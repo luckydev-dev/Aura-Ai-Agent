@@ -1,0 +1,190 @@
+package com.example.core.root
+
+import android.content.Context
+import android.os.Build
+import com.topjohnwu.superuser.Shell
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.util.concurrent.TimeUnit
+
+class RootManager(private val context: Context) {
+
+    init {
+        try {
+            Shell.enableVerboseLogging = false
+            Shell.setDefaultBuilder(
+                Shell.Builder.create()
+                    .setFlags(Shell.FLAG_REDIRECT_STDERR)
+                    .setTimeout(15)
+            )
+        } catch (_: Exception) {}
+    }
+
+    /**
+     * Checks if root access is available and granted.
+     */
+    suspend fun isRootAvailable(): Boolean = withContext(Dispatchers.IO) {
+        runCatching {
+            if (Shell.isAppGrantedRoot() == true) return@withContext true
+            val shell = Shell.getShell()
+            if (shell.isRoot) return@withContext true
+            false
+        }.getOrElse {
+            checkSuBinaryDirect()
+        }
+    }
+
+    /**
+     * Requests root access via prompt if not yet granted.
+     */
+    suspend fun requestRoot(): Boolean = withContext(Dispatchers.IO) {
+        runCatching {
+            val result = execute("id")
+            result.success && result.stdout.contains("uid=0")
+        }.getOrDefault(false)
+    }
+
+    /**
+     * Diagnostic string indicating root type (Magisk, KernelSU, APatch, or None).
+     */
+    suspend fun getDiagnosticInfo(): String = withContext(Dispatchers.IO) {
+        runCatching {
+            val magiskCheck = execute("magisk -v")
+            if (magiskCheck.success && magiskCheck.stdout.isNotBlank()) {
+                return@withContext "Magisk detected (${magiskCheck.stdout.trim()})"
+            }
+            val ksuCheck = execute("which ksu || which ksud")
+            if (ksuCheck.success && ksuCheck.stdout.isNotBlank()) {
+                return@withContext "KernelSU detected"
+            }
+            val apatchCheck = execute("which apd")
+            if (apatchCheck.success && apatchCheck.stdout.isNotBlank()) {
+                return@withContext "APatch detected"
+            }
+            val suCheck = execute("which su")
+            if (suCheck.success && suCheck.stdout.isNotBlank()) {
+                return@withContext "Root available (su at ${suCheck.stdout.trim()})"
+            }
+            "No su binary found. Device may not be rooted."
+        }.getOrDefault("Root diagnostic unavailable.")
+    }
+
+    /**
+     * Executes a command via root shell with a timeout.
+     */
+    suspend fun execute(command: String, timeoutMs: Long = 10000L): RootCommandResult = withContext(Dispatchers.IO) {
+        runCatching {
+            val output = mutableListOf<String>()
+            val result = Shell.cmd(command).to(output).exec()
+            val stdout = output.joinToString("\n")
+            RootCommandResult(
+                stdout = stdout,
+                stderr = if (!result.isSuccess) stdout else "",
+                exitCode = result.code,
+                success = result.isSuccess
+            )
+        }.getOrElse {
+            fallbackExecute(command, timeoutMs)
+        }
+    }
+
+    private fun fallbackExecute(command: String, timeoutMs: Long): RootCommandResult {
+        return try {
+            val process = ProcessBuilder("su", "-c", command)
+                .redirectErrorStream(true)
+                .start()
+            val reader = BufferedReader(InputStreamReader(process.inputStream))
+            val sb = StringBuilder()
+            val completed = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                process.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
+            } else {
+                process.waitFor()
+                true
+            }
+            var line: String?
+            while (reader.readLine().also { line = it } != null) {
+                sb.append(line).append("\n")
+            }
+            if (!completed) {
+                process.destroyForcibly()
+                return RootCommandResult("", "Command timed out", -1, false)
+            }
+            val exitCode = process.exitValue()
+            RootCommandResult(
+                stdout = sb.toString().trim(),
+                stderr = if (exitCode != 0) sb.toString().trim() else "",
+                exitCode = exitCode,
+                success = exitCode == 0
+            )
+        } catch (ex: Exception) {
+            RootCommandResult("", ex.message ?: "Unknown error", -1, false)
+        }
+    }
+
+    private fun checkSuBinaryDirect(): Boolean {
+        return try {
+            val p = Runtime.getRuntime().exec(arrayOf("su", "-c", "id"))
+            val reader = BufferedReader(InputStreamReader(p.inputStream))
+            val line = reader.readLine()
+            p.waitFor()
+            p.exitValue() == 0 && line?.contains("uid=0") == true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Auto-grants all required permissions, settings, and services in one go via root.
+     */
+    suspend fun autoGrantEverything(): Map<String, Boolean> = withContext(Dispatchers.IO) {
+        val pkg = context.packageName
+        val results = mutableMapOf<String, Boolean>()
+
+        val permissions = listOf(
+            "android.permission.RECORD_AUDIO",
+            "android.permission.MODIFY_AUDIO_SETTINGS",
+            "android.permission.READ_CONTACTS",
+            "android.permission.CALL_PHONE",
+            "android.permission.SEND_SMS",
+            "android.permission.READ_SMS",
+            "android.permission.READ_CALL_LOG",
+            "android.permission.CAMERA",
+            "android.permission.POST_NOTIFICATIONS",
+            "android.permission.WRITE_SECURE_SETTINGS"
+        )
+
+        for (perm in permissions) {
+            val res = execute("pm grant $pkg $perm")
+            results[perm] = res.success
+        }
+
+        // SYSTEM_ALERT_WINDOW (draw over other apps)
+        val alertRes = execute("appops set $pkg SYSTEM_ALERT_WINDOW allow")
+        results["SYSTEM_ALERT_WINDOW"] = alertRes.success
+
+        // Battery optimization exemption (whitelist)
+        val batteryRes = execute("dumpsys deviceidle whitelist +$pkg")
+        results["BATTERY_OPTIMIZATION"] = batteryRes.success
+
+        // Enable Accessibility Service
+        val accessComponent = "$pkg/$pkg.service.AuraAccessibilityService"
+        val existingServices = execute("settings get secure enabled_accessibility_services").stdout.trim()
+        val newServices = if (existingServices.isNotBlank() && existingServices != "null") {
+            if (existingServices.contains(accessComponent)) existingServices else "$existingServices:$accessComponent"
+        } else {
+            accessComponent
+        }
+        val setAccess = execute("settings put secure enabled_accessibility_services $newServices")
+        execute("settings put secure accessibility_enabled 1")
+        results["ACCESSIBILITY_SERVICE"] = setAccess.success
+
+        // Enable Notification Listener
+        val notifComponent = "$pkg/$pkg.service.AuraNotificationListener"
+        val notifRes = execute("cmd notification allow_listener $notifComponent")
+        results["NOTIFICATION_LISTENER"] = notifRes.success
+
+        results
+    }
+}
