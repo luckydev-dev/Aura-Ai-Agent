@@ -12,10 +12,25 @@ class SafetyLayerTest {
         val catastrophicCommands = listOf(
             "rm -rf /",
             "rm -f -r /",
+            "rm -rf / --no-preserve-root",
+            "rm --recursive --force /",
             "rm -rf /data",
+            "rm -rf /data/*",
             "rm -rf /system",
+            "rm -rf /system/*",
+            "rm -rf /sdcard/..",
             "dd if=/dev/zero of=/dev/block/bootdevice",
-            "mkfs.ext4 /dev/block/sda"
+            "dd if=/dev/random of=/dev/sda",
+            "mkfs.ext4 /dev/block/sda",
+            "fastboot flash boot boot.img",
+            "flash_image boot boot.img",
+            "blkdiscard /dev/block/sda",
+            "wipe data",
+            "recovery --wipe_data",
+            "setprop persist.sys.foo bar",
+            "pm uninstall com.android.settings",
+            "cmd package uninstall com.google.android.gms",
+            "echo c > /proc/sysrq-trigger"
         )
 
         for (cmd in catastrophicCommands) {
@@ -29,6 +44,27 @@ class SafetyLayerTest {
     }
 
     @Test
+    fun testChainedAndSubshellCatastrophicCommands() {
+        val chainedCommands = listOf(
+            "ls -la; rm -rf /",
+            "echo 'hello' && rm -rf /data/*",
+            "dumpsys battery || rm -rf /system",
+            "echo $(rm -rf /)",
+            "cat `rm -rf /data`",
+            "echo safe \n rm -rf /boot"
+        )
+
+        for (cmd in chainedCommands) {
+            assertTrue("Expected chained '$cmd' to be blocked", SafetyLayer.isCatastrophic(cmd))
+            val assessment = SafetyLayer.evaluateCommand(cmd, requireConfirmation = false)
+            assertTrue(
+                "Expected catastrophic assessment for chained '$cmd'",
+                assessment is CommandSafetyAssessment.CatastrophicBlocked
+            )
+        }
+    }
+
+    @Test
     fun testRiskyCommandsRequireConfirmation() {
         val riskyCommands = listOf(
             "reboot",
@@ -36,7 +72,9 @@ class SafetyLayerTest {
             "shutdown",
             "poweroff",
             "pm uninstall com.whatsapp",
+            "cmd package uninstall com.spotify.music",
             "pm clear com.google.android.youtube",
+            "rm -rf /sdcard/Downloads/old_file.txt",
             "settings put secure enabled_accessibility_services com.example"
         )
 
@@ -58,7 +96,8 @@ class SafetyLayerTest {
             "input tap 500 1000",
             "input text hello",
             "am start -a android.intent.action.VIEW",
-            "cat /proc/meminfo"
+            "cat /proc/meminfo",
+            "echo 'Aura ready'"
         )
 
         for (cmd in safeCommands) {

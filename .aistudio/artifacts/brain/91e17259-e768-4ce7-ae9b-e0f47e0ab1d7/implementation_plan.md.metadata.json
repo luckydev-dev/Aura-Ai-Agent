@@ -1,6 +1,0 @@
-{
-  "summary":  "Implementation plan to fix Gemini Live audio speech response, add setupComplete WebSocket synchronization, fallback microphone capture, and ADB command dialog for Secure System Settings.",
-  "updatedAt":  "2026-10-20T14:02:20.270515071Z",
-  "requestFeedback":  true,
-  "userFacing":  true
-}

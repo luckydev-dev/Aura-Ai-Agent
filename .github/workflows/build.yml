@@ -27,11 +27,17 @@ jobs:
     - name: Ensure .env.example exists as .env
       run: |
         if [ ! -f .env ]; then
-          cp .env.example .env || touch .env
+          cp .env.example .env 2>/dev/null || touch .env
+        fi
+        if [ ! -f debug.keystore ]; then
+          keytool -genkeypair -v -keystore debug.keystore -alias androiddebugkey -keypass android -storepass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
         fi
 
-    - name: Build Debug APK
-      run: gradle assembleDebug
+    - name: Make gradlew executable
+      run: chmod +x gradlew
+
+    - name: Run Tests and Build Debug APK
+      run: ./gradlew test assembleDebug
 
     - name: Upload Debug APK
       uses: actions/upload-artifact@v4

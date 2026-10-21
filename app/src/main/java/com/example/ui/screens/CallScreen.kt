@@ -1,16 +1,25 @@
 package com.example.ui.screens
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -18,7 +27,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import com.example.core.live.LiveConnectionState
 import com.example.core.tools.ActionFeedItem
 import com.example.core.tools.ActionStatus
@@ -26,6 +37,8 @@ import com.example.service.AuraForegroundService
 import com.example.ui.components.*
 import com.example.ui.theme.AuraTheme
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 
 @Composable
 fun CallScreen(
@@ -37,11 +50,32 @@ fun CallScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
     val colors = AuraTheme.colors
     val typography = AuraTheme.typography
 
     val isCallActive by AuraForegroundService.isCallActive.collectAsState()
     val service = AuraForegroundService.currentService
+
+    // Permission launcher for microphone
+    val micPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            AuraForegroundService.startCall(context)
+        } else {
+            Toast.makeText(context, "Microphone permission is required for Aura voice call", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    fun startCallWithPermission() {
+        val hasMic = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        if (hasMic) {
+            AuraForegroundService.startCall(context)
+        } else {
+            micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
 
     // Safe produceState observables to prevent NullPointerException when service is null
     val connectionState by produceState<LiveConnectionState>(initialValue = LiveConnectionState.Disconnected, key1 = service) {
@@ -118,6 +152,14 @@ fun CallScreen(
 
     var isSpeakerOn by remember { mutableStateOf(true) }
 
+    // Synchronize speaker state from preferences
+    LaunchedEffect(service) {
+        if (service != null) {
+            val prefSpeaker = service.preferences.useSpeaker.first()
+            isSpeakerOn = prefSpeaker
+        }
+    }
+
     // Action feed items
     val actionFeed = remember { mutableStateListOf<ActionFeedItem>() }
     LaunchedEffect(service) {
@@ -152,7 +194,7 @@ fun CallScreen(
         connectionState is LiveConnectionState.Reconnecting -> OrbState.RECONNECTING
         connectionState is LiveConnectionState.Error -> OrbState.ERROR
         isAuraActing -> OrbState.ACTING
-        speakerAmp > 0.05f -> OrbState.SPEAKING
+        speakerAmp > 0.04f -> OrbState.SPEAKING
         isAuraThinking -> OrbState.THINKING
         micAmp > 0.04f && !isMuted -> OrbState.LISTENING
         else -> OrbState.IDLE
@@ -254,7 +296,7 @@ fun CallScreen(
                     .fillMaxWidth()
                     .clickable {
                         if (!isCallActive) {
-                            AuraForegroundService.startCall(context)
+                            startCallWithPermission()
                         }
                     },
                 contentAlignment = Alignment.Center
@@ -273,13 +315,16 @@ fun CallScreen(
                 OrbState.THINKING -> "Thinking..."
                 OrbState.SPEAKING -> "Speaking..."
                 OrbState.ACTING -> "Operating device..."
-                OrbState.ERROR -> "Connection error"
-                OrbState.RECONNECTING -> "Reconnecting..."
+                OrbState.ERROR -> (connectionState as? LiveConnectionState.Error)?.message ?: "Connection error"
+                OrbState.RECONNECTING -> "Reconnecting to Live..."
             }
             Spacer(modifier = Modifier.height(16.dp))
             androidx.compose.foundation.text.BasicText(
                 text = stateLabel,
-                style = typography.labelLarge.copy(color = colors.accentStart)
+                style = typography.labelLarge.copy(
+                    color = if (orbState == OrbState.ERROR) colors.danger else colors.accentStart
+                ),
+                maxLines = 2
             )
 
             Spacer(modifier = Modifier.weight(0.15f))
@@ -288,7 +333,7 @@ fun CallScreen(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 70.dp, max = 110.dp)
+                    .heightIn(min = 70.dp, max = 120.dp)
                     .clip(RoundedCornerShape(16.dp))
                     .background(colors.surface.copy(alpha = 0.6f))
                     .border(1.dp, colors.border, RoundedCornerShape(16.dp))
@@ -296,7 +341,14 @@ fun CallScreen(
                 verticalArrangement = Arrangement.Center,
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                if (modelTranscript.isNotBlank()) {
+                if (connectionState is LiveConnectionState.Error) {
+                    val err = (connectionState as LiveConnectionState.Error).message
+                    androidx.compose.foundation.text.BasicText(
+                        text = "Error: $err",
+                        style = typography.bodyMedium.copy(color = colors.danger),
+                        maxLines = 3
+                    )
+                } else if (modelTranscript.isNotBlank()) {
                     androidx.compose.foundation.text.BasicText(
                         text = modelTranscript,
                         style = typography.bodyLarge.copy(color = colors.textPrimary),
@@ -369,13 +421,12 @@ fun CallScreen(
                     icon = AuraIcons.Stop,
                     onClick = {
                         service?.agentLoop?.stop()
-                        service?.liveClient?.disconnect()
                         service?.audioPlayer?.flushAndInterrupt()
                         if (isCallActive) {
                             AuraForegroundService.endCall(context)
                         }
                     },
-                    contentDescription = "Stop all actions",
+                    contentDescription = "Stop speech and active actions",
                     backgroundColor = colors.danger.copy(alpha = 0.2f),
                     tint = colors.danger,
                     size = 52.dp,
@@ -390,18 +441,32 @@ fun CallScreen(
                         .background(if (isMuted) colors.warning.copy(alpha = 0.25f) else colors.surfaceRaised)
                         .border(1.dp, colors.border, CircleShape)
                         .pointerInput(Unit) {
-                            detectTapGestures(
-                                onTap = {
-                                    service?.audioStreamer?.setMuted(!isMuted)
-                                },
-                                onPress = {
-                                    // Press to unmute (push-to-talk)
-                                    service?.audioStreamer?.setMuted(false)
-                                    tryAwaitRelease()
-                                    // Release to mute
-                                    service?.audioStreamer?.setMuted(true)
+                            awaitEachGesture {
+                                val down = awaitFirstDown(requireUnconsumed = false)
+                                val startTime = System.currentTimeMillis()
+                                var isHolding = false
+
+                                while (true) {
+                                    val event = awaitPointerEvent()
+                                    val pressed = event.changes.any { it.pressed }
+                                    if (!pressed) {
+                                        val duration = System.currentTimeMillis() - startTime
+                                        if (isHolding) {
+                                            // Released hold-to-talk -> mute back
+                                            service?.audioStreamer?.setMuted(true)
+                                        } else if (duration < 350) {
+                                            // Short tap -> toggle mute
+                                            val cur = service?.audioStreamer?.isMuted?.value ?: false
+                                            service?.audioStreamer?.setMuted(!cur)
+                                        }
+                                        break
+                                    } else if (!isHolding && System.currentTimeMillis() - startTime >= 350) {
+                                        // Held down for 350ms -> Push-to-Talk unmutes!
+                                        isHolding = true
+                                        service?.audioStreamer?.setMuted(false)
+                                    }
                                 }
-                            )
+                            }
                         },
                     contentAlignment = Alignment.Center
                 ) {
@@ -423,7 +488,7 @@ fun CallScreen(
                             if (isCallActive) {
                                 AuraForegroundService.endCall(context)
                             } else {
-                                AuraForegroundService.startCall(context)
+                                startCallWithPermission()
                             }
                         },
                     contentAlignment = Alignment.Center
@@ -449,8 +514,12 @@ fun CallScreen(
                 AuraIconButton(
                     icon = AuraIcons.Speaker,
                     onClick = {
-                        isSpeakerOn = !isSpeakerOn
-                        service?.audioPlayer?.setSpeakerphoneOn(isSpeakerOn)
+                        val newSpeakerState = !isSpeakerOn
+                        isSpeakerOn = newSpeakerState
+                        service?.audioPlayer?.setSpeakerphoneOn(newSpeakerState)
+                        coroutineScope.launch {
+                            service?.preferences?.setUseSpeaker(newSpeakerState)
+                        }
                     },
                     contentDescription = "Speakerphone",
                     backgroundColor = if (isSpeakerOn) colors.accentStart.copy(alpha = 0.25f) else colors.surfaceRaised,
@@ -461,7 +530,7 @@ fun CallScreen(
             }
         }
 
-        // Keyboard text overlay sheet
+        // Keyboard text overlay sheet (with proper imePadding so it sits on top of soft keyboard)
         if (showKeyboardInput) {
             Box(
                 modifier = Modifier
@@ -477,7 +546,8 @@ fun CallScreen(
                         .background(colors.surface)
                         .clickable(enabled = false) {}
                         .padding(16.dp)
-                        .navigationBarsPadding(),
+                        .navigationBarsPadding()
+                        .imePadding(),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     AuraTextField(
@@ -485,6 +555,20 @@ fun CallScreen(
                         onValueChange = { keyboardText = it },
                         placeholder = "Type command or message to Aura...",
                         modifier = Modifier.weight(1f),
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                        keyboardActions = KeyboardActions(
+                            onSend = {
+                                if (keyboardText.isNotBlank()) {
+                                    val textToSend = keyboardText
+                                    keyboardText = ""
+                                    showKeyboardInput = false
+                                    if (!isCallActive) {
+                                        startCallWithPermission()
+                                    }
+                                    service?.liveClient?.sendTextMessage(textToSend)
+                                }
+                            }
+                        ),
                         testTag = "keyboard_input_field"
                     )
                     Spacer(modifier = Modifier.width(10.dp))
@@ -492,9 +576,13 @@ fun CallScreen(
                         icon = AuraIcons.Send,
                         onClick = {
                             if (keyboardText.isNotBlank()) {
-                                service?.liveClient?.sendTextMessage(keyboardText)
+                                val textToSend = keyboardText
                                 keyboardText = ""
                                 showKeyboardInput = false
+                                if (!isCallActive) {
+                                    startCallWithPermission()
+                                }
+                                service?.liveClient?.sendTextMessage(textToSend)
                             }
                         },
                         contentDescription = "Send",

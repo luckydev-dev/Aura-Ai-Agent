@@ -1,6 +1,7 @@
 package com.example.core.tools
 
 import android.content.Context
+import android.util.Log
 import com.example.core.agent.AgentLoop
 import com.example.core.memory.MemoryRepository
 import com.example.core.root.RootManager
@@ -9,7 +10,6 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.first
-import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Locale
 
@@ -17,7 +17,7 @@ data class ActionFeedItem(
     val id: String,
     val toolName: String,
     val description: String,
-    val status: ActionStatus // RUNNING, SUCCESS, FAILED
+    val status: ActionStatus
 )
 
 enum class ActionStatus {
@@ -45,13 +45,18 @@ class ToolRegistry(
         val powerTools = PowerTools(rootManager, preferences)
 
         val all = appTools.getAllTools() +
-                  commTools.getAllTools() +
-                  deviceTools.getAllTools() +
-                  screenTools.getAllTools() +
-                  mediaTools.getAllTools() +
-                  powerTools.getAllTools()
+                commTools.getAllTools() +
+                deviceTools.getAllTools() +
+                screenTools.getAllTools() +
+                mediaTools.getAllTools() +
+                powerTools.getAllTools()
 
-        all.forEach { toolsMap[it.name] = it }
+        all.forEach { tool ->
+            require(tool.name.matches(Regex("""[a-zA-Z_][a-zA-Z0-9_]*"""))) {
+                "Tool name '${tool.name}' is invalid"
+            }
+            toolsMap[tool.name] = tool
+        }
     }
 
     fun getAllTools(): List<Tool> = toolsMap.values.toList()
@@ -59,18 +64,105 @@ class ToolRegistry(
     fun getTool(name: String): Tool? = toolsMap[name]
 
     /**
-     * Builds Gemini Live tool declarations list.
+     * Sanitizes and normalizes parameter schema to strict Gemini Function Declaration rules:
+     * - If properties is empty or missing, OMIT parameters entirely
+     * - Normalize types to uppercase (OBJECT, STRING, INTEGER, NUMBER, BOOLEAN, ARRAY)
+     * - Remove nulls and unsupported keys (additionalProperties, default, $schema)
+     * - Filter required list so every entry exists in properties
+     */
+    fun sanitizeSchema(raw: Map<String, Any?>?): Map<String, Any>? {
+        if (raw == null) return null
+        val rawProps = raw["properties"] as? Map<*, *>
+        if (rawProps.isNullOrEmpty()) {
+            return null // OMIT parameters field completely
+        }
+
+        fun normalizeValue(value: Any?): Any? {
+            return when (value) {
+                null -> null
+                is Map<*, *> -> {
+                    val result = mutableMapOf<String, Any>()
+                    for ((k, v) in value) {
+                        if (k == null) continue
+                        val keyStr = k.toString()
+                        if (keyStr in listOf("additionalProperties", "default", "\$schema")) continue
+
+                        when (keyStr) {
+                            "type" -> {
+                                if (v is String) {
+                                    result["type"] = v.uppercase(Locale.ROOT)
+                                }
+                            }
+                            "properties" -> {
+                                if (v is Map<*, *>) {
+                                    val cleanProps = mutableMapOf<String, Any>()
+                                    for ((pk, pv) in v) {
+                                        if (pk != null) {
+                                            val norm = normalizeValue(pv)
+                                            if (norm != null) {
+                                                cleanProps[pk.toString()] = norm
+                                            }
+                                        }
+                                    }
+                                    if (cleanProps.isNotEmpty()) {
+                                        result["properties"] = cleanProps
+                                    }
+                                }
+                            }
+                            "required" -> {
+                                if (v is Collection<*>) {
+                                    val reqList = v.mapNotNull { it?.toString() }
+                                    val propKeys = (value["properties"] as? Map<*, *>)?.keys?.mapNotNull { it?.toString() } ?: emptyList()
+                                    val validReq = reqList.filter { it in propKeys }
+                                    if (validReq.isNotEmpty()) {
+                                        result["required"] = validReq
+                                    }
+                                }
+                            }
+                            else -> {
+                                val norm = normalizeValue(v)
+                                if (norm != null) {
+                                    result[keyStr] = norm
+                                }
+                            }
+                        }
+                    }
+                    if (result.isEmpty()) null else result
+                }
+                is Collection<*> -> {
+                    val list = value.mapNotNull { normalizeValue(it) }
+                    list
+                }
+                is String -> value
+                is Number -> value
+                is Boolean -> value
+                else -> value.toString()
+            }
+        }
+
+        val normalized = normalizeValue(raw) as? Map<String, Any> ?: return null
+        val finalProps = normalized["properties"] as? Map<*, *>
+        if (finalProps.isNullOrEmpty()) return null
+        return normalized
+    }
+
+    /**
+     * Builds Gemini Live tool declarations list adhering to strict schema rules.
      */
     suspend fun getToolDeclarationsJson(): List<Map<String, Any>> {
         val disabled = preferences.disabledTools.first()
         return toolsMap.values
             .filter { it.name !in disabled }
             .map { tool ->
-                mapOf(
+                val declaration = mutableMapOf<String, Any>(
                     "name" to tool.name,
-                    "description" to tool.description,
-                    "parameters" to tool.parametersSchema
+                    "description" to tool.description
                 )
+                val sanitizedParams = sanitizeSchema(tool.parametersSchema)
+                if (sanitizedParams != null) {
+                    declaration["parameters"] = sanitizedParams
+                }
+                declaration
             }
     }
 
@@ -92,7 +184,8 @@ class ToolRegistry(
         val result = try {
             tool.execute(args)
         } catch (e: Exception) {
-            ToolExecutionResult(false, "Tool error: ${e.message}")
+            Log.e("Aura", "Tool $name execution failed with exception: ${e.message}", e)
+            ToolExecutionResult(false, "Tool execution failed: ${e.message}")
         }
         val duration = System.currentTimeMillis() - start
 
@@ -109,16 +202,22 @@ class ToolRegistry(
         // Log to Room Database
         val argsJson = try {
             JSONObject(args).toString()
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.w("Aura", "Failed to serialize args for $name: ${e.message}")
             args.toString()
         }
-        memoryRepository.logAction(
-            toolName = name,
-            argsJson = argsJson,
-            output = result.output,
-            success = result.success,
-            durationMs = duration
-        )
+
+        try {
+            memoryRepository.logAction(
+                toolName = name,
+                argsJson = argsJson,
+                output = result.output,
+                success = result.success,
+                durationMs = duration
+            )
+        } catch (e: Exception) {
+            Log.e("Aura", "Failed to log action to memory repository: ${e.message}", e)
+        }
 
         return result
     }

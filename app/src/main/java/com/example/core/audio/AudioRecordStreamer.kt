@@ -8,15 +8,29 @@ import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.AutomaticGainControl
 import android.media.audiofx.NoiseSuppressor
 import android.util.Base64
+import android.util.Log
+import com.example.AuraApplication
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlin.math.sqrt
 
+enum class AudioRecordState {
+    IDLE, RECORDING, INIT_FAILED, PERMISSION_DENIED
+}
+
 class AudioRecordStreamer(
     private val onChunkEncoded: (String) -> Unit
 ) {
+    companion object {
+        private const val TAG = "Aura"
+        const val SAMPLE_RATE = 16000
+        const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
+        const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
+        const val CHUNK_SIZE_BYTES = 1280 // 40ms of 16kHz 16-bit mono PCM
+    }
+
     private var audioRecord: AudioRecord? = null
     private var echoCanceler: AcousticEchoCanceler? = null
     private var noiseSuppressor: NoiseSuppressor? = null
@@ -31,20 +45,18 @@ class AudioRecordStreamer(
     private val _isMuted = MutableStateFlow(false)
     val isMuted: StateFlow<Boolean> = _isMuted.asStateFlow()
 
-    companion object {
-        const val SAMPLE_RATE = 16000
-        const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
-        const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
-        const val CHUNK_SIZE_BYTES = 1280 // 40ms of 16kHz 16-bit mono PCM
-    }
+    private val _recordState = MutableStateFlow(AudioRecordState.IDLE)
+    val recordState: StateFlow<AudioRecordState> = _recordState.asStateFlow()
+
+    private val diagnostics = runCatching { AuraApplication.instance.liveDiagnostics }.getOrNull()
 
     fun setMuted(muted: Boolean) {
         _isMuted.value = muted
     }
 
     @SuppressLint("MissingPermission")
-    fun start(scope: CoroutineScope) {
-        if (isRecording) return
+    fun start(scope: CoroutineScope): Boolean {
+        if (isRecording) return true
 
         val minBufSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
         val bufferSize = maxOf(minBufSize, CHUNK_SIZE_BYTES * 4)
@@ -64,7 +76,8 @@ class AudioRecordStreamer(
                 record.release()
                 record = null
             }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.w(TAG, "AudioRecord VOICE_COMMUNICATION failed to init, trying MIC fallback: ${e.message}")
             record = null
         }
 
@@ -80,14 +93,23 @@ class AudioRecordStreamer(
                 )
                 if (record.state != AudioRecord.STATE_INITIALIZED) {
                     record.release()
-                    return
+                    _recordState.value = AudioRecordState.INIT_FAILED
+                    diagnostics?.setAudioRecordState("Init Failed (MIC uninitialized)")
+                    return false
                 }
-            } catch (_: Exception) {
-                return
+            } catch (e: Exception) {
+                Log.e(TAG, "AudioRecord MIC init failed", e)
+                _recordState.value = AudioRecordState.INIT_FAILED
+                diagnostics?.setAudioRecordState("Init Failed: ${e.message}")
+                return false
             }
         }
 
-        val activeRecord = record ?: return
+        val activeRecord = record ?: run {
+            _recordState.value = AudioRecordState.INIT_FAILED
+            diagnostics?.setAudioRecordState("Init Failed")
+            return false
+        }
 
         // Attach hardware/OS audio enhancements if supported
         val sessionId = activeRecord.audioSessionId
@@ -101,12 +123,16 @@ class AudioRecordStreamer(
             if (AutomaticGainControl.isAvailable()) {
                 gainControl = AutomaticGainControl.create(sessionId)?.apply { enabled = true }
             }
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            Log.w(TAG, "Audio effect attachment notice: ${e.message}")
+        }
 
         try {
             activeRecord.startRecording()
             audioRecord = activeRecord
             isRecording = true
+            _recordState.value = AudioRecordState.RECORDING
+            diagnostics?.setAudioRecordState("Recording (16kHz Mono)")
 
             recordingJob = scope.launch(Dispatchers.IO) {
                 val buffer = ByteArray(CHUNK_SIZE_BYTES)
@@ -134,8 +160,13 @@ class AudioRecordStreamer(
                     }
                 }
             }
-        } catch (_: Exception) {
+            return true
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start recording", e)
+            _recordState.value = AudioRecordState.INIT_FAILED
+            diagnostics?.setAudioRecordState("Start Failed: ${e.message}")
             stop()
+            return false
         }
     }
 
@@ -151,18 +182,24 @@ class AudioRecordStreamer(
                 }
                 release()
             }
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            Log.e(TAG, "Error releasing audioRecord", e)
+        }
         audioRecord = null
 
         try {
             echoCanceler?.release()
             noiseSuppressor?.release()
             gainControl?.release()
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            Log.e(TAG, "Error releasing audio effects", e)
+        }
         echoCanceler = null
         noiseSuppressor = null
         gainControl = null
 
         _micAmplitude.value = 0f
+        _recordState.value = AudioRecordState.IDLE
+        diagnostics?.setAudioRecordState("Idle")
     }
 }

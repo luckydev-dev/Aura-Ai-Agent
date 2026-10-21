@@ -6,6 +6,8 @@ import com.topjohnwu.superuser.Shell
 
 class AuraApplication : Application() {
 
+    val liveDiagnostics = com.example.core.live.LiveDiagnostics()
+
     lateinit var overlayManager: OverlayManager
         private set
 

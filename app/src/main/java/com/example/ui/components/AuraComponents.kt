@@ -96,7 +96,8 @@ fun AuraButton(
             }
             androidx.compose.foundation.text.BasicText(
                 text = text,
-                style = typography.labelLarge.copy(color = contentColor)
+                style = typography.labelLarge.copy(color = contentColor),
+                maxLines = 1
             )
         }
     }
@@ -185,6 +186,43 @@ fun AuraToggle(
                 .size(thumbSize)
                 .clip(CircleShape)
                 .background(Color.White)
+        )
+    }
+}
+
+@Composable
+fun AuraToggleRow(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+    testTag: String = ""
+) {
+    val colors = AuraTheme.colors
+    val typography = AuraTheme.typography
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .clickable { onCheckedChange(!checked) },
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+            androidx.compose.foundation.text.BasicText(
+                text = title,
+                style = typography.titleMedium.copy(color = colors.textPrimary)
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            androidx.compose.foundation.text.BasicText(
+                text = subtitle,
+                style = typography.bodySmall.copy(color = colors.textSecondary)
+            )
+        }
+        AuraToggle(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            testTag = testTag
         )
     }
 }
