@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.PowerManager
 import android.provider.Settings
+import android.util.Log
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -32,7 +33,8 @@ data class SetupCheckItem(
     val id: String,
     val title: String,
     val description: String,
-    val isGranted: Boolean
+    val isGranted: Boolean,
+    val isService: Boolean = false
 )
 
 @Composable
@@ -78,8 +80,8 @@ fun SetupWizardScreen(
                 SetupCheckItem("audio", "Audio & Microphone", "Allows real-time conversation and wake phrase", hasAudio),
                 SetupCheckItem("contacts", "Contacts & Phone Calling", "Allows voice calling and messaging contacts", hasContacts && hasPhone),
                 SetupCheckItem("sms", "SMS & Text Messaging", "Allows sending and reading text messages", hasSms),
-                SetupCheckItem("accessibility", "Accessibility Service", "Enables screen reading and device automation", hasAccessibility),
-                SetupCheckItem("notification", "Notification Listener", "Reads and replies to incoming notifications", hasNotification),
+                SetupCheckItem("accessibility", "Accessibility Service", if (hasAccessibility) "Bound and active for screen automation" else "NOT BOUND - required for device automation", hasAccessibility, isService = true),
+                SetupCheckItem("notification", "Notification Listener", if (hasNotification) "Bound and listening to notifications" else "NOT BOUND - required for reading/replying", hasNotification, isService = true),
                 SetupCheckItem("overlay", "Draw Over Other Apps", "Allows floating mini orb over other apps", hasOverlay),
                 SetupCheckItem("battery", "Battery Exemption", "Ensures voice calls are not killed in background", isBatteryWhitelisted),
                 SetupCheckItem("secure", "Secure System Settings", "Allows toggling Wi-Fi, Bluetooth, Airplane mode", hasSecureSettings)
@@ -108,13 +110,16 @@ fun SetupWizardScreen(
 
         try {
             context.startActivity(intent)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.e("Aura", "Failed to start settings activity for $itemId", e)
             val appDetails = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", context.packageName, null)).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             try {
                 context.startActivity(appDetails)
-            } catch (_: Exception) {}
+            } catch (ex: Exception) {
+                Log.e("Aura", "Failed to start application details activity", ex)
+            }
         }
     }
 
@@ -172,7 +177,7 @@ fun SetupWizardScreen(
         )
         Spacer(modifier = Modifier.height(6.dp))
         androidx.compose.foundation.text.BasicText(
-            text = "Tap any item to grant permission directly in System Settings, or tap 'Grant Everything' for root auto-configuration.",
+            text = "Tap any item to grant permission directly, or tap 'Grant Everything' for root auto-configuration. Unbound services show red.",
             style = typography.bodySmall.copy(color = colors.textSecondary)
         )
 
@@ -184,12 +189,15 @@ fun SetupWizardScreen(
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             items(checkItems, key = { it.id }) { item ->
+                val isRedUnbound = !item.isGranted && item.isService
+                val cardBorder = if (isRedUnbound) colors.danger else colors.border
+
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(16.dp))
                         .background(colors.surface)
-                        .border(1.dp, colors.border, RoundedCornerShape(16.dp))
+                        .border(1.dp, cardBorder, RoundedCornerShape(16.dp))
                         .clickable { openPermissionSettings(item.id) }
                         .padding(14.dp),
                     verticalAlignment = Alignment.CenterVertically
@@ -198,8 +206,22 @@ fun SetupWizardScreen(
                         modifier = Modifier
                             .size(24.dp)
                             .clip(CircleShape)
-                            .background(if (item.isGranted) colors.success.copy(alpha = 0.2f) else colors.surfaceRaised)
-                            .border(1.dp, if (item.isGranted) colors.success else colors.border, CircleShape),
+                            .background(
+                                when {
+                                    item.isGranted -> colors.success.copy(alpha = 0.2f)
+                                    isRedUnbound -> colors.danger.copy(alpha = 0.2f)
+                                    else -> colors.surfaceRaised
+                                }
+                            )
+                            .border(
+                                1.dp,
+                                when {
+                                    item.isGranted -> colors.success
+                                    isRedUnbound -> colors.danger
+                                    else -> colors.border
+                                },
+                                CircleShape
+                            ),
                         contentAlignment = Alignment.Center
                     ) {
                         if (item.isGranted) {
@@ -209,6 +231,11 @@ fun SetupWizardScreen(
                                 colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(colors.success),
                                 modifier = Modifier.size(14.dp)
                             )
+                        } else if (isRedUnbound) {
+                            androidx.compose.foundation.text.BasicText(
+                                text = "!",
+                                style = typography.labelSmall.copy(color = colors.danger)
+                            )
                         }
                     }
 
@@ -217,16 +244,24 @@ fun SetupWizardScreen(
                     Column(modifier = Modifier.weight(1f)) {
                         androidx.compose.foundation.text.BasicText(
                             text = item.title,
-                            style = typography.labelLarge.copy(color = colors.textPrimary)
+                            style = typography.labelLarge.copy(
+                                color = if (isRedUnbound) colors.danger else colors.textPrimary
+                            )
                         )
                         androidx.compose.foundation.text.BasicText(
                             text = item.description,
-                            style = typography.bodySmall.copy(color = colors.textSecondary)
+                            style = typography.bodySmall.copy(
+                                color = if (isRedUnbound) colors.danger.copy(alpha = 0.8f) else colors.textSecondary
+                            )
                         )
                     }
 
                     AuraBadge(
-                        text = if (item.isGranted) "Verified" else "Tap to Grant",
+                        text = when {
+                            item.isGranted -> "Verified"
+                            isRedUnbound -> "Not Bound - Retry"
+                            else -> "Tap to Grant"
+                        },
                         isSuccess = item.isGranted
                     )
                 }
@@ -258,9 +293,9 @@ fun SetupWizardScreen(
             )
 
             AuraButton(
-                text = "Refresh",
+                text = "Retry / Refresh",
                 onClick = { refreshChecks() },
-                modifier = Modifier.weight(0.5f),
+                modifier = Modifier.weight(0.6f),
                 isPrimary = false,
                 testTag = "refresh_btn"
             )

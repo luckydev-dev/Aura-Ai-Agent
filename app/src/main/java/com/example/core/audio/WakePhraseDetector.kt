@@ -4,12 +4,17 @@ import android.annotation.SuppressLint
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.util.Log
 import kotlinx.coroutines.*
 import kotlin.math.sqrt
 
 class WakePhraseDetector(
     private val onWakePhraseDetected: () -> Unit
 ) {
+    companion object {
+        private const val TAG = "Aura"
+    }
+
     private var isListening = false
     private var job: Job? = null
     private var audioRecord: AudioRecord? = null
@@ -35,6 +40,7 @@ class WakePhraseDetector(
             )
 
             if (record.state != AudioRecord.STATE_INITIALIZED) {
+                Log.e(TAG, "AudioRecord failed to initialize for wake phrase detection")
                 record.release()
                 return
             }
@@ -71,7 +77,8 @@ class WakePhraseDetector(
                     }
                 }
             }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception in WakePhraseDetector startListening", e)
             stopListening()
         }
     }
@@ -85,7 +92,9 @@ class WakePhraseDetector(
                 if (state == AudioRecord.STATE_INITIALIZED) stop()
                 release()
             }
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception in WakePhraseDetector stopListening", e)
+        }
         audioRecord = null
     }
 }

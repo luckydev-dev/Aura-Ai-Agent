@@ -342,6 +342,9 @@ fun CallScreen(
             // Realtime Captions OR Full Scrollable Error Card
             if (connectionState is LiveConnectionState.Error) {
                 val errorMsg = (connectionState as LiveConnectionState.Error).message
+                val hint = getErrorHint(errorMsg)
+                val fullCopyText = if (hint != null) "$errorMsg\n\n$hint" else errorMsg
+
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -363,7 +366,7 @@ fun CallScreen(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         androidx.compose.foundation.text.BasicText(
-                            text = "Error details",
+                            text = "Connection Error (Server Message)",
                             style = typography.labelLarge.copy(color = colors.danger)
                         )
                     }
@@ -371,13 +374,22 @@ fun CallScreen(
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .heightIn(max = 130.dp)
+                            .heightIn(min = 60.dp, max = 180.dp)
                             .verticalScroll(rememberScrollState())
                     ) {
-                        androidx.compose.foundation.text.BasicText(
-                            text = errorMsg,
-                            style = typography.bodySmall.copy(color = colors.textPrimary)
-                        )
+                        Column {
+                            androidx.compose.foundation.text.BasicText(
+                                text = errorMsg,
+                                style = typography.bodySmall.copy(color = colors.textPrimary)
+                            )
+                            if (hint != null) {
+                                Spacer(modifier = Modifier.height(6.dp))
+                                androidx.compose.foundation.text.BasicText(
+                                    text = hint,
+                                    style = typography.labelSmall.copy(color = colors.warning)
+                                )
+                            }
+                        }
                     }
                     Spacer(modifier = Modifier.height(10.dp))
                     Row(
@@ -388,9 +400,9 @@ fun CallScreen(
                             text = "Copy Error",
                             onClick = {
                                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                                val clip = android.content.ClipData.newPlainText("Aura Error", errorMsg)
+                                val clip = android.content.ClipData.newPlainText("Aura Error", fullCopyText)
                                 clipboard.setPrimaryClip(clip)
-                                Toast.makeText(context, "Error copied to clipboard", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "Full error copied to clipboard", Toast.LENGTH_SHORT).show()
                             },
                             modifier = Modifier.weight(1f),
                             icon = AuraIcons.Copy,
@@ -682,5 +694,32 @@ fun CallScreen(
                 }
             }
         }
+    }
+}
+
+private fun getErrorHint(errorMessage: String): String? {
+    return when {
+        errorMessage.contains("1007") || errorMessage.contains("Thinking level must be specified", ignoreCase = true) || errorMessage.contains("invalid argument", ignoreCase = true) -> {
+            when {
+                errorMessage.contains("thinking level", ignoreCase = true) || errorMessage.contains("thinkingLevel", ignoreCase = true) ->
+                    "Hint (Code 1007): Model requires a thinking level. Choose LOW, MEDIUM, or HIGH in Settings."
+                errorMessage.contains("realtime_input_config", ignoreCase = true) ->
+                    "Hint (Code 1007): Offending field 'realtime_input_config' is not supported."
+                errorMessage.contains("tools", ignoreCase = true) ->
+                    "Hint (Code 1007): Tool configuration was rejected by server."
+                else ->
+                    "Hint (Code 1007): A setup argument was rejected by the server. Check your model profile in Settings."
+            }
+        }
+        errorMessage.contains("1008") || errorMessage.contains("not found", ignoreCase = true) -> {
+            "Hint (Code 1008): Model not found. Go to Settings and tap 'Fetch available Live models' to pick a valid model."
+        }
+        errorMessage.contains("401") || errorMessage.contains("403") || errorMessage.contains("ACCESS_TOKEN_TYPE_UNSUPPORTED", ignoreCase = true) || errorMessage.contains("API key not valid", ignoreCase = true) -> {
+            "Hint: Authentication error. If key starts with 'AQ.', use a standard API key starting with 'AIza...' in Settings."
+        }
+        errorMessage.contains("Setup timeout", ignoreCase = true) -> {
+            "Hint: Connection timed out waiting for server setupComplete. Check internet connectivity and model availability."
+        }
+        else -> null
     }
 }

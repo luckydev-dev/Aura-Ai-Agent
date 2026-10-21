@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import okhttp3.*
+import okio.ByteString
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
@@ -24,7 +25,9 @@ sealed class LiveConnectionState {
 
 /**
  * Robust bidirectional WebSocket client for Gemini Live (BidiGenerateContent).
- * Handles setup handshake, realtime PCM audio I/O, server turns, tool calls, and diagnostics.
+ * Supports text and binary frames (OkHttp ByteString), raw frame logging,
+ * shared handshake construction with per-model profiles (thinkingConfig & non-blocking tools),
+ * watchdog diagnostics, and audio I/O.
  */
 class GeminiLiveClient(
     private val toolRegistry: ToolRegistry,
@@ -80,29 +83,38 @@ class GeminiLiveClient(
     private var currentModel: String = ""
     private var currentVoice: String = ""
     private var currentSystemPrompt: String = ""
+    private var currentThinkingLevel: String = "LOW"
 
     fun connect(
         scope: CoroutineScope,
         apiKey: String,
         model: String,
         voice: String,
-        systemPrompt: String
+        systemPrompt: String,
+        thinkingLevel: String = "LOW"
     ) {
         this.scope = scope
         this.currentApiKey = apiKey.trim()
-        val rawModel = if (model.isBlank() || model == "gemini-2.0-flash-exp") DEFAULT_FALLBACK_MODEL else model.trim()
+        val rawModel = if (model.isBlank() || model == "gemini-2.0-flash-exp" || model == "gemini-live-2.5-flash-preview") {
+            DEFAULT_FALLBACK_MODEL
+        } else {
+            model.trim()
+        }
         this.currentModel = rawModel
         this.currentVoice = voice.ifBlank { "Aoede" }
         this.currentSystemPrompt = systemPrompt
+        this.currentThinkingLevel = thinkingLevel.ifBlank { "LOW" }
         this.intentionalDisconnect = false
         this.terminalError = false
         this.reconnectAttempt = 0
         this.isSetupComplete = false
 
+        diagnostics?.resetForNewConnection()
+        diagnostics?.setAuthKey(this.currentApiKey)
         diagnostics?.setModel(this.currentModel)
         diagnostics?.setSetupComplete(false)
         diagnostics?.updateConnectionState("Connecting")
-        diagnostics?.log(TAG, "Starting Live connection with model: $currentModel, voice: $currentVoice")
+        diagnostics?.log(TAG, "Starting Live connection with model: $currentModel, voice: $currentVoice, thinking: $currentThinkingLevel, key: ${GeminiLiveHandshake.maskApiKey(currentApiKey)}")
 
         startWebSocketConnection()
     }
@@ -133,38 +145,51 @@ class GeminiLiveClient(
 
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                Log.i(TAG, "WebSocket connected. Sending setup message...")
-                diagnostics?.log(TAG, "WebSocket connected HTTP ${response.code}")
+                val httpCode = response.code
+                diagnostics?.setSocketOpened(httpCode)
+                Log.i(TAG, "WebSocket connected HTTP $httpCode. Sending setup message...")
+                diagnostics?.log(TAG, "WebSocket connected HTTP $httpCode")
                 scope?.launch(Dispatchers.IO) {
                     sendSetupMessage(webSocket)
                     startSetupWatchdog()
                 }
             }
 
+            // TEXT FRAME
             override fun onMessage(webSocket: WebSocket, text: String) {
-                handleServerMessage(text)
+                processIncomingFrame(text, isBinary = false)
+            }
+
+            // BINARY FRAME (OkHttp ByteString, handles JSON delivered as binary)
+            override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                processIncomingFrame(bytes.utf8(), isBinary = true)
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-                val msg = "Server closed: $code $reason"
+                val hint = GeminiLiveHandshake.getAuthHintForError(currentApiKey, reason)
+                val msg = buildString {
+                    append("Server closed: $code $reason")
+                    if (hint != null) append("\n$hint")
+                }
                 Log.e(TAG, "WebSocket onClosing: $msg")
                 diagnostics?.setLastClose(code, reason)
                 diagnostics?.log(TAG, msg)
 
                 setupTimeoutJob?.cancel()
 
-                val isTerminal = code in 1007..1008 || code == 400 || code == 403 ||
+                val isTerminal = code in 1007..1008 || code == 400 || code == 401 || code == 403 ||
                         reason.contains("not found", ignoreCase = true) ||
                         reason.contains("invalid", ignoreCase = true) ||
                         reason.contains("API_KEY", ignoreCase = true) ||
-                        reason.contains("API key", ignoreCase = true)
+                        reason.contains("API key", ignoreCase = true) ||
+                        reason.contains("ACCESS_TOKEN_TYPE_UNSUPPORTED", ignoreCase = true)
 
                 if (isTerminal) {
                     terminalError = true
                 }
 
                 _connectionState.value = LiveConnectionState.Error(msg)
-                _modelTranscript.value = "Server closed connection: $reason"
+                _modelTranscript.value = msg
                 webSocket.close(code, null)
 
                 if (!intentionalDisconnect && !isTerminal) {
@@ -196,10 +221,15 @@ class GeminiLiveClient(
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 val respBody = runCatching { response?.body?.string() }.getOrNull() ?: ""
                 val httpStatus = response?.code
+                val maskedKey = GeminiLiveHandshake.maskApiKey(currentApiKey)
+                val hint = GeminiLiveHandshake.getAuthHintForError(currentApiKey, "$httpStatus $respBody ${t.message}")
+
                 val errMessage = buildString {
                     if (httpStatus != null) append("HTTP $httpStatus: ")
                     append(t.message ?: "Network failure")
-                    if (respBody.isNotBlank()) append(" - ").append(respBody.take(200))
+                    if (respBody.isNotBlank()) append(" - ").append(respBody.take(300))
+                    append(" (Key: $maskedKey)")
+                    if (hint != null) append("\n$hint")
                 }
                 Log.e(TAG, "WebSocket onFailure: $errMessage", t)
                 diagnostics?.log(TAG, "onFailure: $errMessage")
@@ -211,7 +241,8 @@ class GeminiLiveClient(
                         errMessage.contains("not found", ignoreCase = true) ||
                         errMessage.contains("invalid", ignoreCase = true) ||
                         errMessage.contains("API_KEY", ignoreCase = true) ||
-                        errMessage.contains("API key", ignoreCase = true)
+                        errMessage.contains("API key", ignoreCase = true) ||
+                        errMessage.contains("ACCESS_TOKEN_TYPE_UNSUPPORTED", ignoreCase = true)
 
                 if (isTerminal) {
                     terminalError = true
@@ -233,74 +264,165 @@ class GeminiLiveClient(
         setupTimeoutJob = scope?.launch {
             delay(10000L)
             if (!isSetupComplete && _connectionState.value !is LiveConnectionState.Error) {
-                val timeoutMsg = "Setup timeout: setupComplete not received from server within 10s"
-                Log.e(TAG, timeoutMsg)
-                diagnostics?.log(TAG, timeoutMsg)
+                val framesCount = diagnostics?.framesReceivedCount?.value ?: 0
+                val upgradeCode = diagnostics?.httpUpgradeResponseCode?.value ?: 101
+
+                val baseTimeoutMsg = if (framesCount == 0) {
+                    "Setup timeout: Socket open (HTTP $upgradeCode) but server sent nothing within 10s (check API key type / model)"
+                } else {
+                    val firstFrame = diagnostics?.firstFrameReceivedContent?.value ?: ""
+                    "Setup timeout: Received $framesCount frame(s) but no setupComplete arrived within 10s. First frame: ${firstFrame.take(200)}"
+                }
+
+                val hint = GeminiLiveHandshake.getAuthHintForError(currentApiKey, baseTimeoutMsg)
+                val fullTimeoutMsg = if (hint != null) "$baseTimeoutMsg\n$hint" else baseTimeoutMsg
+
+                Log.e(TAG, fullTimeoutMsg)
+                diagnostics?.log(TAG, fullTimeoutMsg)
                 terminalError = true
-                _connectionState.value = LiveConnectionState.Error(timeoutMsg)
-                _modelTranscript.value = timeoutMsg
-                diagnostics?.updateConnectionState("Error: $timeoutMsg")
+                _connectionState.value = LiveConnectionState.Error(fullTimeoutMsg)
+                _modelTranscript.value = fullTimeoutMsg
+                diagnostics?.updateConnectionState("Error: Setup timeout")
                 webSocket?.close(1000, "Setup timeout")
             }
         }
     }
 
     private suspend fun sendSetupMessage(ws: WebSocket) {
-        val modelPath = if (currentModel.startsWith("models/")) currentModel else "models/$currentModel"
+        val toolDeclarations = toolRegistry.getToolDeclarationsJson()
+        val setupPayload = GeminiLiveHandshake.buildSetupMessageJson(
+            model = currentModel,
+            voice = currentVoice,
+            systemPrompt = currentSystemPrompt,
+            resumptionHandle = resumptionHandle,
+            toolDeclarationsJson = toolDeclarations,
+            thinkingLevel = currentThinkingLevel
+        )
 
-        val setupObj = JSONObject().apply {
-            put("model", modelPath)
-            put("generationConfig", JSONObject().apply {
-                put("responseModalities", JSONArray().apply { put("AUDIO") })
-                put("speechConfig", JSONObject().apply {
-                    put("voiceConfig", JSONObject().apply {
-                        put("prebuiltVoiceConfig", JSONObject().apply {
-                            put("voiceName", currentVoice)
-                        })
-                    })
-                })
-            })
+        Log.i(TAG, "Sending setup message for model $currentModel (thinkingLevel=$currentThinkingLevel) with ${toolRegistry.getAllTools().size} tools (voice=$currentVoice)")
+        diagnostics?.log(TAG, "Sent setup JSON (${setupPayload.length} chars, model=$currentModel)")
+        ws.send(setupPayload)
+    }
 
-            // Transcriptions
-            put("inputAudioTranscription", JSONObject())
-            put("outputAudioTranscription", JSONObject())
+    /**
+     * Unified handler for incoming WebSocket frames (both text and binary utf8).
+     */
+    private fun processIncomingFrame(rawText: String, isBinary: Boolean) {
+        val parsed = GeminiLiveHandshake.parseAndLogIncomingFrame(rawText, isBinary, diagnostics)
 
-            // Resumption (only if handle was provided by previous server session)
-            if (resumptionHandle.isNotBlank()) {
-                put("sessionResumption", JSONObject().apply {
-                    put("handle", resumptionHandle)
-                })
-            }
+        if (parsed.isSetupComplete) {
+            isSetupComplete = true
+            reconnectAttempt = 0
+            terminalError = false
+            setupTimeoutJob?.cancel()
+            _connectionState.value = LiveConnectionState.Connected
+            diagnostics?.setSetupComplete(true)
+            diagnostics?.updateConnectionState("Connected")
+            diagnostics?.log(TAG, "setupComplete received successfully (${if (isBinary) "binary" else "text"} frame)")
+            Log.i(TAG, "Gemini Live setupComplete received! Live session active.")
+        }
 
-            if (currentSystemPrompt.isNotBlank()) {
-                put("systemInstruction", JSONObject().apply {
-                    put("parts", JSONArray().apply {
-                        put(JSONObject().apply { put("text", currentSystemPrompt) })
-                    })
-                })
-            }
+        if (parsed.resumptionHandle != null) {
+            resumptionHandle = parsed.resumptionHandle
+            diagnostics?.log(TAG, "Session resumption handle: ${resumptionHandle.take(12)}...")
+        }
 
-            // Function declarations for tools
-            val toolDeclarations = toolRegistry.getToolDeclarationsJson()
-            if (toolDeclarations.isNotEmpty()) {
-                val declarationsArray = JSONArray()
-                for (tool in toolDeclarations) {
-                    declarationsArray.put(JSONObject(tool))
+        if (parsed.isGoAway) {
+            Log.w(TAG, "Server issued goAway: ${parsed.goAwayReason}")
+            diagnostics?.log(TAG, "Server goAway: ${parsed.goAwayReason}")
+            disconnectInternal(reconnect = true)
+            return
+        }
+
+        val root = parsed.rawJson ?: return
+
+        try {
+            // Process serverContent
+            if (root.has("serverContent")) {
+                val serverContent = root.getJSONObject("serverContent")
+
+                // Accumulated input transcription (User speech recognized by server)
+                if (serverContent.has("inputAudioTranscription")) {
+                    val inTrans = serverContent.getJSONObject("inputAudioTranscription")
+                    val transcript = inTrans.optString("text")
+                    if (transcript.isNotBlank()) {
+                        userTurnAccumulator.append(transcript)
+                        _userTranscript.value = userTurnAccumulator.toString()
+                    }
                 }
-                put("tools", JSONArray().apply {
-                    put(JSONObject().apply {
-                        put("functionDeclarations", declarationsArray)
-                    })
-                })
+
+                // Accumulated output transcription (Model speech converted to text)
+                if (serverContent.has("outputAudioTranscription")) {
+                    val outTrans = serverContent.getJSONObject("outputAudioTranscription")
+                    val transcript = outTrans.optString("text")
+                    if (transcript.isNotBlank()) {
+                        modelTurnAccumulator.append(transcript)
+                        _modelTranscript.value = modelTurnAccumulator.toString()
+                    }
+                }
+
+                if (serverContent.has("modelTurn")) {
+                    _isAuraThinking.value = false
+                    val modelTurn = serverContent.getJSONObject("modelTurn")
+                    val parts = modelTurn.optJSONArray("parts")
+                    if (parts != null) {
+                        for (i in 0 until parts.length()) {
+                            val part = parts.getJSONObject(i)
+
+                            // Audio parts
+                            if (part.has("inlineData")) {
+                                val inlineData = part.getJSONObject("inlineData")
+                                val base64Data = inlineData.optString("data")
+                                if (base64Data.isNotBlank()) {
+                                    val pcmBytes = Base64.decode(base64Data, Base64.DEFAULT)
+                                    diagnostics?.recordAudioReceived(pcmBytes.size.toLong())
+                                    audioPlayer.enqueuePcm(pcmBytes)
+                                }
+                            }
+
+                            // Text parts
+                            if (part.has("text")) {
+                                val chunkText = part.getString("text")
+                                modelTurnAccumulator.append(chunkText)
+                                _modelTranscript.value = modelTurnAccumulator.toString()
+                            }
+                        }
+                    }
+                }
+
+                // User interrupted Aura speech
+                if (serverContent.optBoolean("interrupted", false)) {
+                    Log.i(TAG, "Model speech interrupted by user")
+                    audioPlayer.flushAndInterrupt()
+                    _isAuraThinking.value = false
+                }
+
+                // Turn completed by model
+                if (serverContent.optBoolean("turnComplete", false)) {
+                    _isAuraThinking.value = false
+                    userTurnAccumulator.setLength(0)
+                }
+
+                if (serverContent.optBoolean("generationComplete", false)) {
+                    _isAuraThinking.value = false
+                }
             }
-        }
 
-        val root = JSONObject().apply {
-            put("setup", setupObj)
-        }
+            // Handle tool calls / function calls
+            if (root.has("toolCall")) {
+                val toolCall = root.getJSONObject("toolCall")
+                handleToolCall(toolCall)
+            }
 
-        Log.i(TAG, "Sending setup message for model $modelPath with ${toolRegistry.getAllTools().size} tools")
-        ws.send(root.toString())
+            if (root.has("toolCallCancellation")) {
+                Log.w(TAG, "Tool calls cancelled by server")
+                _isAuraActing.value = false
+            }
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error processing server message content: ${e.message}", e)
+            diagnostics?.log(TAG, "Content dispatch error: ${e.message}")
+        }
     }
 
     /**
@@ -361,143 +483,20 @@ class GeminiLiveClient(
         }
     }
 
-    private fun handleServerMessage(text: String) {
-        try {
-            val root = JSONObject(text)
-            val rootKeys = root.keys().asSequence().toList()
-            for (key in rootKeys) {
-                diagnostics?.recordMessage(key)
-            }
-
-            if (root.has("setupComplete")) {
-                isSetupComplete = true
-                reconnectAttempt = 0
-                terminalError = false
-                setupTimeoutJob?.cancel()
-                _connectionState.value = LiveConnectionState.Connected
-                diagnostics?.setSetupComplete(true)
-                diagnostics?.updateConnectionState("Connected")
-                diagnostics?.log(TAG, "setupComplete received successfully")
-                Log.i(TAG, "Gemini Live setupComplete received! Live session active.")
-            }
-
-            // Session resumption update
-            if (root.has("sessionResumptionUpdate")) {
-                val sru = root.getJSONObject("sessionResumptionUpdate")
-                val handle = sru.optString("handle")
-                if (handle.isNotBlank()) {
-                    resumptionHandle = handle
-                    diagnostics?.log(TAG, "Session resumption handle received: ${handle.take(12)}...")
-                }
-            }
-
-            // Server GoAway (server requests reconnection)
-            if (root.has("goAway")) {
-                val goAway = root.getJSONObject("goAway")
-                val reason = goAway.optString("reason", "Server requested goAway")
-                Log.w(TAG, "Server issued goAway: $reason")
-                diagnostics?.log(TAG, "Server goAway: $reason")
-                disconnectInternal(reconnect = true)
-                return
-            }
-
-            // Process serverContent
-            if (root.has("serverContent")) {
-                val serverContent = root.getJSONObject("serverContent")
-
-                // Accumulated input transcription (User's speech recognized by server)
-                if (serverContent.has("inputAudioTranscription")) {
-                    val inTrans = serverContent.getJSONObject("inputAudioTranscription")
-                    val transcript = inTrans.optString("text")
-                    if (transcript.isNotBlank()) {
-                        userTurnAccumulator.append(transcript)
-                        _userTranscript.value = userTurnAccumulator.toString()
-                    }
-                }
-
-                // Accumulated output transcription (Model's speech converted to text)
-                if (serverContent.has("outputAudioTranscription")) {
-                    val outTrans = serverContent.getJSONObject("outputAudioTranscription")
-                    val transcript = outTrans.optString("text")
-                    if (transcript.isNotBlank()) {
-                        modelTurnAccumulator.append(transcript)
-                        _modelTranscript.value = modelTurnAccumulator.toString()
-                    }
-                }
-
-                if (serverContent.has("modelTurn")) {
-                    _isAuraThinking.value = false
-                    val modelTurn = serverContent.getJSONObject("modelTurn")
-                    val parts = modelTurn.optJSONArray("parts")
-                    if (parts != null) {
-                        for (i in 0 until parts.length()) {
-                            val part = parts.getJSONObject(i)
-
-                            // Audio parts
-                            if (part.has("inlineData")) {
-                                val inlineData = part.getJSONObject("inlineData")
-                                val base64Data = inlineData.optString("data")
-                                if (base64Data.isNotBlank()) {
-                                    val pcmBytes = Base64.decode(base64Data, Base64.DEFAULT)
-                                    diagnostics?.recordAudioReceived(pcmBytes.size.toLong())
-                                    audioPlayer.enqueuePcm(pcmBytes)
-                                }
-                            }
-
-                            // Text parts
-                            if (part.has("text")) {
-                                val chunkText = part.getString("text")
-                                modelTurnAccumulator.append(chunkText)
-                                _modelTranscript.value = modelTurnAccumulator.toString()
-                            }
-                        }
-                    }
-                }
-
-                // User interrupted Aura's speech
-                if (serverContent.optBoolean("interrupted", false)) {
-                    Log.i(TAG, "Model speech interrupted by user")
-                    audioPlayer.flushAndInterrupt()
-                    _isAuraThinking.value = false
-                }
-
-                // Turn completed by model
-                if (serverContent.optBoolean("turnComplete", false)) {
-                    _isAuraThinking.value = false
-                    userTurnAccumulator.setLength(0)
-                }
-
-                if (serverContent.optBoolean("generationComplete", false)) {
-                    _isAuraThinking.value = false
-                }
-            }
-
-            // Handle tool calls / function calls
-            if (root.has("toolCall")) {
-                val toolCall = root.getJSONObject("toolCall")
-                handleToolCall(toolCall)
-            }
-
-            if (root.has("toolCallCancellation")) {
-                Log.w(TAG, "Tool calls cancelled by server")
-                _isAuraActing.value = false
-            }
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Error handling server message: ${e.message}", e)
-        }
-    }
-
     private fun handleToolCall(toolCall: JSONObject) {
         val functionCalls = toolCall.optJSONArray("functionCalls") ?: return
-        _isAuraActing.value = true
+        val isExtendedThinking = currentModel.removePrefix("models/").trim().equals("gemini-3.8-live-extended-thinking", ignoreCase = true)
+
+        if (!isExtendedThinking) {
+            _isAuraActing.value = true
+        }
 
         scope?.launch(Dispatchers.Default) {
-            executeToolsAsync(functionCalls)
+            executeToolsAsync(functionCalls, isExtendedThinking)
         }
     }
 
-    private suspend fun executeToolsAsync(functionCalls: JSONArray) = coroutineScope {
+    private suspend fun executeToolsAsync(functionCalls: JSONArray, isExtendedThinking: Boolean) = coroutineScope {
         val deferredResponses = (0 until functionCalls.length()).map { i ->
             val callObj = functionCalls.optJSONObject(i)
             callObj?.let { call ->
@@ -515,104 +514,134 @@ class GeminiLiveClient(
 
                 async(Dispatchers.IO) {
                     try {
-                        Log.i(TAG, "Executing tool '$toolName' id=$callId with args: $argsMap")
+                        Log.i(TAG, "Executing tool '$toolName' id=$callId with args: $argsMap (nonBlocking=$isExtendedThinking)")
                         val result = toolRegistry.executeTool(toolName, argsMap)
+
                         val respPayload = JSONObject().apply {
-                            put("success", result.success)
-                            put("output", result.output)
-                            if (result.requiresConfirmation) {
-                                put("requiresConfirmation", true)
-                                put("confirmationPrompt", result.confirmationPrompt)
+                            put("id", callId)
+                            put("name", toolName)
+                            val responseObj = JSONObject().apply {
+                                put("result", result.output)
+                                put("success", result.success)
+                                if (isExtendedThinking) {
+                                    put("scheduling", "WHEN_IDLE")
+                                }
+                            }
+                            put("response", responseObj)
+                            if (isExtendedThinking) {
+                                put("scheduling", "WHEN_IDLE")
                             }
                         }
-                        JSONObject().apply {
-                            put("id", callId)
-                            put("name", toolName)
-                            put("response", JSONObject().apply {
-                                put("output", respPayload)
-                            })
+                        diagnostics?.log(TAG, "Tool '$toolName' finished (${result.success})")
+                        if (isExtendedThinking) {
+                            sendToolResponse(listOf(respPayload))
                         }
+                        respPayload
                     } catch (e: Exception) {
-                        Log.e(TAG, "Tool $toolName execution threw exception", e)
-                        val errorPayload = JSONObject().apply {
-                            put("success", false)
-                            put("output", "Error: ${e.message}")
-                        }
-                        JSONObject().apply {
+                        Log.e(TAG, "Tool execution failed for '$toolName'", e)
+                        val errPayload = JSONObject().apply {
                             put("id", callId)
                             put("name", toolName)
-                            put("response", JSONObject().apply {
-                                put("output", errorPayload)
-                            })
+                            val responseObj = JSONObject().apply {
+                                put("error", e.message ?: "Execution failed")
+                                put("success", false)
+                                if (isExtendedThinking) {
+                                    put("scheduling", "WHEN_IDLE")
+                                }
+                            }
+                            put("response", responseObj)
+                            if (isExtendedThinking) {
+                                put("scheduling", "WHEN_IDLE")
+                            }
                         }
+                        if (isExtendedThinking) {
+                            sendToolResponse(listOf(errPayload))
+                        }
+                        errPayload
                     }
                 }
-            } ?: CompletableDeferred(JSONObject())
-        }
+            }
+        }.filterNotNull()
 
-        val responses = deferredResponses.awaitAll()
-        val functionResponses = JSONArray()
-        responses.forEach { functionResponses.put(it) }
-
-        // Send toolResponse back to Gemini Live
-        val responseRoot = JSONObject().apply {
-            put("toolResponse", JSONObject().apply {
-                put("functionResponses", functionResponses)
-            })
+        val results = deferredResponses.awaitAll()
+        if (!isExtendedThinking) {
+            sendToolResponse(results)
         }
+    }
+
+    private fun sendToolResponse(responses: List<JSONObject>) {
+        val ws = webSocket ?: return
+        if (responses.isEmpty()) return
 
         try {
-            webSocket?.send(responseRoot.toString())
-            Log.d(TAG, "Sent tool responses: ${functionResponses.length()}")
+            val responsesArray = JSONArray()
+            for (r in responses) {
+                responsesArray.put(r)
+            }
+
+            val root = JSONObject().apply {
+                put("toolResponse", JSONObject().apply {
+                    put("functionResponses", responsesArray)
+                })
+            }
+
+            ws.send(root.toString())
+            _isAuraActing.value = false
+            diagnostics?.recordMessage("toolResponse(${responses.size})")
+            Log.i(TAG, "Sent tool responses for ${responses.size} tools to Live API")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to send toolResponse", e)
-        } finally {
             _isAuraActing.value = false
         }
     }
 
     private fun scheduleReconnect(reason: String) {
-        if (terminalError || (_connectionState.value is LiveConnectionState.Error && reconnectAttempt >= MAX_RECONNECT_ATTEMPTS)) {
-            Log.w(TAG, "Not scheduling reconnect because terminalError=$terminalError or already max attempts reached.")
+        if (terminalError || _connectionState.value is LiveConnectionState.Error) {
+            Log.w(TAG, "Bypassing reconnect: terminalError=$terminalError, state=${_connectionState.value}")
+            return
+        }
+
+        if (reconnectAttempt >= MAX_RECONNECT_ATTEMPTS) {
+            val capMsg = "Reconnection failed after $MAX_RECONNECT_ATTEMPTS attempts: $reason"
+            Log.e(TAG, capMsg)
+            terminalError = true
+            _connectionState.value = LiveConnectionState.Error(capMsg)
+            diagnostics?.updateConnectionState("Error: Reconnect cap reached")
+            diagnostics?.log(TAG, capMsg)
             return
         }
 
         reconnectAttempt++
-        val attempt = reconnectAttempt
+        _connectionState.value = LiveConnectionState.Reconnecting(reconnectAttempt)
+        diagnostics?.updateConnectionState("Reconnecting ($reconnectAttempt/5)")
 
-        if (attempt > MAX_RECONNECT_ATTEMPTS) {
-            val errorMsg = "Reconnection failed after $MAX_RECONNECT_ATTEMPTS attempts: $reason"
-            Log.e(TAG, errorMsg)
-            terminalError = true
-            _connectionState.value = LiveConnectionState.Error(errorMsg)
-            diagnostics?.updateConnectionState(errorMsg)
-            diagnostics?.log(TAG, errorMsg)
-            return
-        }
-
-        _connectionState.value = LiveConnectionState.Reconnecting(attempt)
-        diagnostics?.updateConnectionState("Reconnecting ($attempt/$MAX_RECONNECT_ATTEMPTS): $reason")
         reconnectJob?.cancel()
         reconnectJob = scope?.launch {
-            val backoffMs = (1000L * (1 shl (attempt - 1).coerceAtMost(5))).coerceAtMost(30000L)
-            Log.w(TAG, "Scheduling reconnect attempt $attempt/$MAX_RECONNECT_ATTEMPTS in ${backoffMs}ms due to: $reason")
+            val backoffMs = (1000L * (1L shl (reconnectAttempt - 1))).coerceAtMost(30000L)
+            Log.i(TAG, "Scheduling reconnect attempt $reconnectAttempt in ${backoffMs}ms due to: $reason")
+            diagnostics?.log(TAG, "Reconnect in ${backoffMs}ms (attempt $reconnectAttempt/5)")
             delay(backoffMs)
-            if (!intentionalDisconnect && !terminalError) {
-                startWebSocketConnection()
-            }
+            startWebSocketConnection()
         }
     }
 
     private fun disconnectInternal(reconnect: Boolean) {
         setupTimeoutJob?.cancel()
+        reconnectJob?.cancel()
+
         try {
-            webSocket?.close(1000, "Reconnecting")
+            webSocket?.close(1000, "Normal closure")
         } catch (e: Exception) {
             Log.e(TAG, "Error closing websocket", e)
         }
         webSocket = null
-        if (reconnect && !terminalError) {
-            startWebSocketConnection()
+        isSetupComplete = false
+
+        if (reconnect) {
+            scheduleReconnect("goAway received")
+        } else {
+            _connectionState.value = LiveConnectionState.Disconnected
+            diagnostics?.updateConnectionState("Disconnected")
         }
     }
 
@@ -621,20 +650,16 @@ class GeminiLiveClient(
         terminalError = false
         setupTimeoutJob?.cancel()
         reconnectJob?.cancel()
-        reconnectJob = null
+
         try {
-            webSocket?.close(1000, "User ended call")
+            webSocket?.close(1000, "User disconnected")
         } catch (e: Exception) {
             Log.e(TAG, "Error closing websocket on disconnect", e)
         }
         webSocket = null
         isSetupComplete = false
         _connectionState.value = LiveConnectionState.Disconnected
-        _isAuraThinking.value = false
-        _isAuraActing.value = false
-        userTurnAccumulator.setLength(0)
-        modelTurnAccumulator.setLength(0)
         diagnostics?.updateConnectionState("Disconnected")
-        audioPlayer.stop()
+        diagnostics?.log(TAG, "User disconnected call")
     }
 }

@@ -4,9 +4,13 @@ import android.app.*
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.example.MainActivity
 import com.example.R
@@ -28,6 +32,8 @@ import kotlinx.coroutines.flow.first
 class AuraForegroundService : Service() {
 
     companion object {
+        private const val TAG = "Aura"
+
         const val ACTION_START_CALL = "com.example.aura.START_CALL"
         const val ACTION_END_CALL = "com.example.aura.END_CALL"
         const val ACTION_TOGGLE_MUTE = "com.example.aura.TOGGLE_MUTE"
@@ -63,6 +69,8 @@ class AuraForegroundService : Service() {
 
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var wakeLock: PowerManager.WakeLock? = null
+    private var audioFocusRequest: AudioFocusRequest? = null
+    private val audioManager by lazy { getSystemService(Context.AUDIO_SERVICE) as AudioManager }
 
     lateinit var preferences: AuraPreferences
     lateinit var memoryRepository: MemoryRepository
@@ -143,15 +151,66 @@ class AuraForegroundService : Service() {
         }
     }
 
+    private fun requestVoiceAudioFocus() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val playbackAttributes = AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+
+                val focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
+                    .setAudioAttributes(playbackAttributes)
+                    .setAcceptsDelayedFocusGain(true)
+                    .setOnAudioFocusChangeListener { focusChange ->
+                        Log.d(TAG, "Voice audio focus changed: $focusChange")
+                    }
+                    .build()
+
+                audioFocusRequest = focusRequest
+                val result = audioManager.requestAudioFocus(focusRequest)
+                Log.i(TAG, "Requested USAGE_VOICE_COMMUNICATION audio focus: result=$result")
+            } else {
+                @Suppress("DEPRECATION")
+                val result = audioManager.requestAudioFocus(
+                    { focusChange -> Log.d(TAG, "Voice audio focus changed: $focusChange") },
+                    AudioManager.STREAM_VOICE_CALL,
+                    AudioManager.AUDIOFOCUS_GAIN_TRANSIENT
+                )
+                Log.i(TAG, "Requested legacy voice audio focus: result=$result")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to request voice audio focus", e)
+        }
+    }
+
+    private fun abandonVoiceAudioFocus() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                audioFocusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
+                audioFocusRequest = null
+            } else {
+                @Suppress("DEPRECATION")
+                audioManager.abandonAudioFocus(null)
+            }
+            Log.i(TAG, "Abandoned voice audio focus")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to abandon voice audio focus", e)
+        }
+    }
+
     private fun initiateCall() {
         if (_isCallActive.value) return
         _isCallActive.value = true
         wakeLock?.acquire(3 * 3600 * 1000L) // 3h max
 
+        requestVoiceAudioFocus()
+
         serviceScope.launch {
             val apiKey = preferences.apiKey.first()
             val model = preferences.modelName.first()
             val voice = preferences.voiceName.first()
+            val thinkingLevel = preferences.thinkingLevel.first()
             val basePersona = preferences.systemInstruction.first()
             val memoryContext = memoryRepository.buildMemoryContextSummary()
             val fullPrompt = if (memoryContext.isNotBlank()) "$basePersona\n\n$memoryContext" else basePersona
@@ -162,18 +221,19 @@ class AuraForegroundService : Service() {
             audioPlayer.start(serviceScope)
             audioStreamer.start(serviceScope)
 
-            // Listen for errors to release mic/speaker and reset active call state
+            // Listen for errors to release mic/speaker/audio focus and reset active call state
             launch {
                 liveClient.connectionState.collect { state ->
                     if (state is LiveConnectionState.Error) {
                         _isCallActive.value = false
                         audioStreamer.stop()
                         audioPlayer.stop()
+                        abandonVoiceAudioFocus()
                     }
                 }
             }
 
-            liveClient.connect(serviceScope, apiKey, model, voice, fullPrompt)
+            liveClient.connect(serviceScope, apiKey, model, voice, fullPrompt, thinkingLevel)
         }
     }
 
@@ -182,12 +242,15 @@ class AuraForegroundService : Service() {
         liveClient.disconnect()
         audioStreamer.stop()
         audioPlayer.stop()
+        abandonVoiceAudioFocus()
 
         try {
             if (wakeLock?.isHeld == true) {
                 wakeLock?.release()
             }
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            Log.e(TAG, "Error releasing wakeLock", e)
+        }
 
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()

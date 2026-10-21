@@ -3,6 +3,7 @@ package com.example.ui.screens
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.util.Log
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -20,6 +21,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.example.AuraApplication
+import com.example.core.live.GeminiLiveHandshake
+import com.example.core.live.LiveDiagnostics
 import com.example.core.settings.AuraPreferences
 import com.example.ui.components.*
 import com.example.ui.theme.AuraTheme
@@ -33,8 +36,7 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
-import org.json.JSONArray
-import org.json.JSONObject
+import okio.ByteString
 import java.util.concurrent.TimeUnit
 
 @Composable
@@ -54,36 +56,61 @@ fun SettingsScreen(
     val apiKey by preferences.apiKey.collectAsState(initial = "")
     val modelName by preferences.modelName.collectAsState(initial = AuraPreferences.DEFAULT_MODEL)
     val voiceName by preferences.voiceName.collectAsState(initial = AuraPreferences.DEFAULT_VOICE)
+    val thinkingLevel by preferences.thinkingLevel.collectAsState(initial = AuraPreferences.DEFAULT_THINKING_LEVEL)
+    val cachedLiveModels by preferences.cachedLiveModels.collectAsState(initial = emptySet())
     val wakeEnabled by preferences.wakePhraseEnabled.collectAsState(initial = false)
     val confirmRisky by preferences.confirmRiskyActions.collectAsState(initial = true)
     val overlayEnabled by preferences.overlayEnabled.collectAsState(initial = false)
     val isWaBusiness by preferences.isWhatsappBusiness.collectAsState(initial = false)
-    val themeMode by preferences.themeMode.collectAsState(initial = "dark")
     val systemInstruction by preferences.systemInstruction.collectAsState(initial = AuraPreferences.DEFAULT_SYSTEM_INSTRUCTION)
 
     var inputApiKey by remember(apiKey) { mutableStateOf(apiKey) }
     var inputModel by remember(modelName) { mutableStateOf(modelName) }
+    var inputThinkingLevel by remember(thinkingLevel) { mutableStateOf(thinkingLevel) }
     var inputInstruction by remember(systemInstruction) { mutableStateOf(systemInstruction) }
 
-    var testConnectionStatus by remember { mutableStateOf<String?>(null) }
     var isTestingConnection by remember { mutableStateOf(false) }
+    var testConnectionStatus by remember { mutableStateOf<String?>(null) }
     var showDiagnosticsModal by remember { mutableStateOf(false) }
 
-    val availableVoices = listOf("Aoede", "Puck", "Charon", "Kore", "Fenrir", "Leda", "Orus", "Zephyr")
+    var isFetchingModels by remember { mutableStateOf(false) }
+    var fetchModelsMessage by remember { mutableStateOf<String?>(null) }
+    var fetchModelsSuccess by remember { mutableStateOf(true) }
 
-    Box(modifier = modifier.fillMaxSize()) {
+    // Display models: either fetched live list or baseline defaults
+    val displayedModels = remember(cachedLiveModels) {
+        if (cachedLiveModels.isNotEmpty()) {
+            cachedLiveModels.toList()
+        } else {
+            AuraPreferences.INITIAL_LIVE_MODELS
+        }
+    }
+
+    // Keep diagnostics aware of currently configured key
+    LaunchedEffect(inputApiKey) {
+        if (inputApiKey.isNotBlank()) {
+            diagnostics.setAuthKey(inputApiKey)
+        }
+    }
+
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(colors.background)
+    ) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .background(colors.background)
                 .statusBarsPadding()
                 .navigationBarsPadding()
                 .padding(horizontal = 20.dp)
         ) {
             AuraTopBar(
-                title = "Settings",
+                title = "Settings & AI Configuration",
                 onBack = onBack
             )
+
+            Spacer(modifier = Modifier.height(10.dp))
 
             LazyColumn(
                 modifier = Modifier.weight(1f),
@@ -96,7 +123,7 @@ fun SettingsScreen(
                             text = "Gemini API Key",
                             style = typography.titleMedium.copy(color = colors.textPrimary)
                         )
-                        Spacer(modifier = Modifier.height(6.dp))
+                        Spacer(modifier = Modifier.height(4.dp))
                         androidx.compose.foundation.text.BasicText(
                             text = "Required for Gemini Live bidirectional voice streaming.",
                             style = typography.bodySmall.copy(color = colors.textSecondary)
@@ -111,6 +138,11 @@ fun SettingsScreen(
                             placeholder = "AIzaSy...",
                             testTag = "api_key_field"
                         )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        androidx.compose.foundation.text.BasicText(
+                            text = "Format: ${GeminiLiveHandshake.getKeyTypeDescription(inputApiKey)}",
+                            style = typography.labelSmall.copy(color = colors.textTertiary)
+                        )
                         Spacer(modifier = Modifier.height(10.dp))
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -123,7 +155,12 @@ fun SettingsScreen(
                                     scope.launch {
                                         isTestingConnection = true
                                         testConnectionStatus = "Connecting to Live WebSocket..."
-                                        val result = testGeminiLiveWebSocket(inputApiKey, inputModel)
+                                        val result = testGeminiLiveWebSocket(
+                                            apiKey = inputApiKey,
+                                            model = inputModel,
+                                            thinkingLevel = inputThinkingLevel,
+                                            diagnostics = diagnostics
+                                        )
                                         testConnectionStatus = result
                                         isTestingConnection = false
                                     }
@@ -133,7 +170,7 @@ fun SettingsScreen(
                                 testTag = "test_connection_btn"
                             )
                             testConnectionStatus?.let { status ->
-                                val isSuccess = status.startsWith("Live OK") || status.contains("Successful")
+                                val isSuccess = status.startsWith("Live OK") || status.contains("ready")
                                 androidx.compose.foundation.text.BasicText(
                                     text = status,
                                     style = typography.labelSmall.copy(
@@ -158,30 +195,86 @@ fun SettingsScreen(
                             text = "Select Aura's speech synthesis voice for Gemini Live.",
                             style = typography.bodySmall.copy(color = colors.textSecondary)
                         )
-                        Spacer(modifier = Modifier.height(12.dp))
-                        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            items(availableVoices) { voice ->
+                        Spacer(modifier = Modifier.height(10.dp))
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            items(listOf("Aoede", "Charon", "Fenrir", "Kore", "Puck")) { voice ->
                                 AuraChip(
                                     text = voice,
-                                    selected = voice == voiceName,
-                                    onClick = {
-                                        scope.launch { preferences.setVoiceName(voice) }
-                                    },
-                                    testTag = "voice_chip_$voice"
+                                    selected = voiceName == voice,
+                                    onClick = { scope.launch { preferences.setVoiceName(voice) } }
                                 )
                             }
                         }
                     }
                 }
 
-                // Model Configuration
+                // Model Selection Section (Dynamically fetched from server)
                 item {
                     AuraCard(modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            androidx.compose.foundation.text.BasicText(
+                                text = "Gemini Live Model",
+                                style = typography.titleMedium.copy(color = colors.textPrimary)
+                            )
+                            AuraButton(
+                                text = if (isFetchingModels) "Fetching..." else "Fetch available Live models",
+                                onClick = {
+                                    scope.launch {
+                                        isFetchingModels = true
+                                        fetchModelsMessage = "Querying supported bidi models..."
+                                        val result = GeminiLiveHandshake.fetchAvailableLiveModels(inputApiKey)
+                                        result.onSuccess { models ->
+                                            preferences.setCachedLiveModels(models.toSet())
+                                            fetchModelsSuccess = true
+                                            fetchModelsMessage = "Fetched ${models.size} Live model(s)"
+                                        }.onFailure { err ->
+                                            fetchModelsSuccess = false
+                                            fetchModelsMessage = "Fetch failed: ${err.message}"
+                                        }
+                                        isFetchingModels = false
+                                    }
+                                },
+                                isPrimary = false,
+                                enabled = !isFetchingModels && inputApiKey.isNotBlank()
+                            )
+                        }
+
+                        fetchModelsMessage?.let { msg ->
+                            Spacer(modifier = Modifier.height(4.dp))
+                            androidx.compose.foundation.text.BasicText(
+                                text = msg,
+                                style = typography.labelSmall.copy(
+                                    color = if (fetchModelsSuccess) colors.success else colors.danger
+                                )
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
                         androidx.compose.foundation.text.BasicText(
-                            text = "Live Model Identifier",
-                            style = typography.titleMedium.copy(color = colors.textPrimary)
+                            text = "Select an active model supporting bidirectional streaming (bidiGenerateContent):",
+                            style = typography.bodySmall.copy(color = colors.textSecondary)
                         )
-                        Spacer(modifier = Modifier.height(6.dp))
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        // Model Chips
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            items(displayedModels) { model ->
+                                AuraChip(
+                                    text = model,
+                                    selected = inputModel == model,
+                                    onClick = {
+                                        inputModel = model
+                                        scope.launch { preferences.setModelName(model) }
+                                    }
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
                         AuraTextField(
                             value = inputModel,
                             onValueChange = {
@@ -189,24 +282,42 @@ fun SettingsScreen(
                                 scope.launch { preferences.setModelName(it) }
                             },
                             placeholder = "gemini-3.8-live",
-                            testTag = "model_name_field"
+                            testTag = "model_field"
                         )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        androidx.compose.foundation.text.BasicText(
-                            text = "Suggested models:",
-                            style = typography.labelSmall.copy(color = colors.textTertiary)
-                        )
-                        Spacer(modifier = Modifier.height(6.dp))
-                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            items(AuraPreferences.SUGGESTED_MODELS) { suggested ->
-                                AuraChip(
-                                    text = suggested,
-                                    selected = inputModel == suggested,
-                                    onClick = {
-                                        inputModel = suggested
-                                        scope.launch { preferences.setModelName(suggested) }
-                                    }
-                                )
+
+                        // Warning if saved/entered model is not in available models list
+                        if (displayedModels.isNotEmpty() && !displayedModels.contains(inputModel)) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            androidx.compose.foundation.text.BasicText(
+                                text = "⚠️ This model is not available for your key. Pick one from the fetched list above.",
+                                style = typography.labelSmall.copy(color = colors.warning)
+                            )
+                        }
+
+                        // Thinking Level options if model is extended thinking
+                        if (inputModel.equals("gemini-3.8-live-extended-thinking", ignoreCase = true)) {
+                            Spacer(modifier = Modifier.height(14.dp))
+                            androidx.compose.foundation.text.BasicText(
+                                text = "Thinking Level (Required for Extended Thinking)",
+                                style = typography.labelLarge.copy(color = colors.accentStart)
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            androidx.compose.foundation.text.BasicText(
+                                text = "Higher levels provide more thorough reasoning before tool calls.",
+                                style = typography.bodySmall.copy(color = colors.textSecondary)
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                items(AuraPreferences.THINKING_LEVEL_OPTIONS) { level ->
+                                    AuraChip(
+                                        text = level,
+                                        selected = inputThinkingLevel == level,
+                                        onClick = {
+                                            inputThinkingLevel = level
+                                            scope.launch { preferences.setThinkingLevel(level) }
+                                        }
+                                    )
+                                }
                             }
                         }
                     }
@@ -227,7 +338,7 @@ fun SettingsScreen(
                                 )
                                 Spacer(modifier = Modifier.height(4.dp))
                                 androidx.compose.foundation.text.BasicText(
-                                    text = "Inspect WebSocket status, audio buffers, close codes, and logs.",
+                                    text = "Inspect WebSocket frames, text/binary counters, and server status.",
                                     style = typography.bodySmall.copy(color = colors.textSecondary)
                                 )
                             }
@@ -326,6 +437,12 @@ fun SettingsScreen(
         if (showDiagnosticsModal) {
             val diagState by diagnostics.connectionState.collectAsState()
             val diagModel by diagnostics.currentModel.collectAsState()
+            val diagAuth by diagnostics.authKeyType.collectAsState()
+            val diagHttpCode by diagnostics.httpUpgradeResponseCode.collectAsState()
+            val diagFramesCount by diagnostics.framesReceivedCount.collectAsState()
+            val diagTextFrames by diagnostics.textFramesCount.collectAsState()
+            val diagBinaryFrames by diagnostics.binaryFramesCount.collectAsState()
+            val diagLastFrame by diagnostics.lastFramePreview.collectAsState()
             val diagLastClose by diagnostics.lastCloseCodeAndReason.collectAsState()
             val diagSent by diagnostics.bytesAudioSent.collectAsState()
             val diagRecv by diagnostics.bytesAudioReceived.collectAsState()
@@ -334,18 +451,19 @@ fun SettingsScreen(
             val diagRecState by diagnostics.audioRecordState.collectAsState()
             val diagTrackState by diagnostics.audioTrackState.collectAsState()
             val diagLogs by diagnostics.lastServerMessageTypes.collectAsState()
+            val diagUptime = diagnostics.getUptimeFormatted()
 
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.7f))
+                    .background(Color.Black.copy(alpha = 0.75f))
                     .clickable { showDiagnosticsModal = false },
                 contentAlignment = Alignment.Center
             ) {
                 AuraCard(
                     modifier = Modifier
-                        .fillMaxWidth(0.92f)
-                        .fillMaxHeight(0.85f)
+                        .fillMaxWidth(0.94f)
+                        .fillMaxHeight(0.90f)
                         .clickable(enabled = false) {}
                 ) {
                     Row(
@@ -373,13 +491,40 @@ fun SettingsScreen(
                         item {
                             DiagnosticRow("Live State", diagState, colors.accentStart)
                             DiagnosticRow("Model", diagModel, colors.textPrimary)
+                            DiagnosticRow("Auth Key Type", diagAuth, if (diagAuth.startsWith("AQ")) colors.warning else colors.textPrimary)
                             DiagnosticRow("Setup Complete", if (diagSetupOk) "YES (Received)" else "NO", if (diagSetupOk) colors.success else colors.warning)
+                            DiagnosticRow("HTTP Upgrade", if (diagHttpCode > 0) "$diagHttpCode" else "None", if (diagHttpCode == 101) colors.success else colors.textPrimary)
+                            DiagnosticRow("Socket Connected", diagUptime, colors.textPrimary)
+                            DiagnosticRow("Frames Received", "$diagFramesCount (text $diagTextFrames / binary $diagBinaryFrames)", if (diagFramesCount > 0) colors.success else colors.textSecondary)
+                            DiagnosticRow("Audio Bytes Sent", "$diagSent bytes", if (diagSent > 0) colors.success else colors.textPrimary)
+                            DiagnosticRow("Audio Bytes Received", "$diagRecv bytes", if (diagRecv > 0) colors.success else colors.textPrimary)
                             DiagnosticRow("Last Close Code", diagLastClose, colors.textSecondary)
-                            DiagnosticRow("Audio Bytes Sent", "$diagSent bytes", colors.textPrimary)
-                            DiagnosticRow("Audio Bytes Received", "$diagRecv bytes", colors.textPrimary)
                             DiagnosticRow("Mic Permission", diagMic, colors.textPrimary)
-                            DiagnosticRow("Audio Record State", diagRecState, colors.textPrimary)
-                            DiagnosticRow("Audio Track State", diagTrackState, colors.textPrimary)
+                            DiagnosticRow("Audio Record", diagRecState, colors.textPrimary)
+                            DiagnosticRow("Audio Track", diagTrackState, colors.textPrimary)
+                        }
+
+                        // Last Frame Preview
+                        item {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            androidx.compose.foundation.text.BasicText(
+                                text = "Last Frame Preview:",
+                                style = typography.labelLarge.copy(color = colors.textPrimary)
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(colors.surfaceRaised)
+                                    .border(1.dp, colors.border, RoundedCornerShape(8.dp))
+                                    .padding(8.dp)
+                            ) {
+                                androidx.compose.foundation.text.BasicText(
+                                    text = diagLastFrame.ifBlank { "No frame received yet." },
+                                    style = typography.bodySmall.copy(color = colors.textSecondary)
+                                )
+                            }
                         }
 
                         item {
@@ -412,19 +557,9 @@ fun SettingsScreen(
                     AuraButton(
                         text = "Copy Diagnostics to Clipboard",
                         onClick = {
-                            val text = """
-                                Aura Diagnostics Report:
-                                Connection State: $diagState
-                                Model: $diagModel
-                                Setup Complete: $diagSetupOk
-                                Last Close: $diagLastClose
-                                Sent: $diagSent bytes, Received: $diagRecv bytes
-                                Record: $diagRecState, Track: $diagTrackState
-                                Recent Events:
-                                ${diagLogs.joinToString("\n")}
-                            """.trimIndent()
+                            val fullText = diagnostics.getFullLogText()
                             val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                            clipboard.setPrimaryClip(ClipData.newPlainText("Aura Diagnostics", text))
+                            clipboard.setPrimaryClip(ClipData.newPlainText("Aura Diagnostics", fullText))
                             Toast.makeText(context, "Diagnostics copied to clipboard", Toast.LENGTH_SHORT).show()
                         },
                         modifier = Modifier.fillMaxWidth(),
@@ -444,7 +579,8 @@ private fun DiagnosticRow(label: String, value: String, valueColor: Color) {
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 3.dp),
-        horizontalArrangement = Arrangement.SpaceBetween
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
     ) {
         androidx.compose.foundation.text.BasicText(
             text = label,
@@ -459,18 +595,32 @@ private fun DiagnosticRow(label: String, value: String, valueColor: Color) {
 
 /**
  * Tests the REAL Gemini Live BidiGenerateContent WebSocket connection end-to-end.
- * Connects, sends setup, waits up to 10s for setupComplete, and verifies voice readiness.
+ * Uses shared GeminiLiveHandshake for setup payload creation and incoming frame parsing,
+ * supporting both text frames and OkHttp ByteString binary frames.
  */
-private suspend fun testGeminiLiveWebSocket(apiKey: String, model: String): String = withContext(Dispatchers.IO) {
+private suspend fun testGeminiLiveWebSocket(
+    apiKey: String,
+    model: String,
+    thinkingLevel: String,
+    diagnostics: LiveDiagnostics?
+): String = withContext(Dispatchers.IO) {
     if (apiKey.isBlank()) return@withContext "API Key is empty"
 
-    val modelName = if (model.isBlank() || model == "gemini-2.0-flash-exp") AuraPreferences.DEFAULT_MODEL else model.trim()
-    val modelPath = if (modelName.startsWith("models/")) modelName else "models/$modelName"
+    val modelName = if (model.isBlank() || model == "gemini-2.0-flash-exp" || model == "gemini-live-2.5-flash-preview") {
+        AuraPreferences.DEFAULT_MODEL
+    } else {
+        model.trim()
+    }
     val url = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${apiKey.trim()}"
 
+    diagnostics?.resetForNewConnection()
+    diagnostics?.setAuthKey(apiKey)
+    diagnostics?.setModel(modelName)
+    diagnostics?.updateConnectionState("Testing Connection")
+
     val client = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(10, TimeUnit.SECONDS)
+        .connectTimeout(12, TimeUnit.SECONDS)
+        .readTimeout(12, TimeUnit.SECONDS)
         .build()
 
     val resultDeferred = CompletableDeferred<String>()
@@ -480,57 +630,81 @@ private suspend fun testGeminiLiveWebSocket(apiKey: String, model: String): Stri
 
     ws = client.newWebSocket(request, object : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
-            val setupObj = JSONObject().apply {
-                put("model", modelPath)
-                put("generationConfig", JSONObject().apply {
-                    put("responseModalities", JSONArray().apply { put("AUDIO") })
-                    put("speechConfig", JSONObject().apply {
-                        put("voiceConfig", JSONObject().apply {
-                            put("prebuiltVoiceConfig", JSONObject().apply {
-                                put("voiceName", "Aoede")
-                            })
-                        })
-                    })
-                })
-            }
-            val root = JSONObject().apply {
-                put("setup", setupObj)
-            }
-            webSocket.send(root.toString())
+            diagnostics?.setSocketOpened(response.code)
+            val setupPayload = GeminiLiveHandshake.buildSetupMessageJson(
+                model = modelName,
+                voice = "Aoede",
+                thinkingLevel = thinkingLevel
+            )
+            diagnostics?.log("Aura", "Test: WebSocket connected HTTP ${response.code}, sending setup for $modelName (thinkingLevel=$thinkingLevel)")
+            webSocket.send(setupPayload)
         }
 
+        // TEXT FRAME
         override fun onMessage(webSocket: WebSocket, text: String) {
-            try {
-                val json = JSONObject(text)
-                if (json.has("setupComplete")) {
-                    resultDeferred.complete("Live OK ($modelName ready)")
-                    webSocket.close(1000, "Test complete")
-                }
-            } catch (e: Exception) {
-                resultDeferred.complete("Message parse error: ${e.message}")
+            handleFrame(webSocket, text, isBinary = false)
+        }
+
+        // BINARY FRAME (OkHttp ByteString)
+        override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+            handleFrame(webSocket, bytes.utf8(), isBinary = true)
+        }
+
+        private fun handleFrame(webSocket: WebSocket, rawText: String, isBinary: Boolean) {
+            val parsed = GeminiLiveHandshake.parseAndLogIncomingFrame(rawText, isBinary, diagnostics)
+            if (parsed.isSetupComplete) {
+                diagnostics?.setSetupComplete(true)
+                diagnostics?.updateConnectionState("Connected")
+                resultDeferred.complete("Live OK ($modelName ready)")
+                webSocket.close(1000, "Test complete")
             }
         }
 
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+            diagnostics?.setLastClose(code, reason)
             webSocket.close(code, null)
-            resultDeferred.complete("Server closed: $code $reason")
+            val hint = when (code) {
+                1007 -> "Invalid argument: check thinkingConfig or model parameters"
+                1008 -> "Model not found: pick an available model from 'Fetch available Live models'"
+                else -> GeminiLiveHandshake.getAuthHintForError(apiKey, reason)
+            }
+            val msg = if (hint != null) "Server closed: $code $reason\nHint: $hint" else "Server closed: $code $reason"
+            resultDeferred.complete(msg)
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             val body = runCatching { response?.body?.string() }.getOrNull() ?: ""
             val code = response?.code
-            val msg = if (code != null) "HTTP $code: ${t.message} $body" else t.message ?: "Connection failure"
-            resultDeferred.complete("Failed: $msg")
+            diagnostics?.setLastClose(code ?: -1, "${t.message} $body")
+            val baseMsg = if (code != null) "HTTP $code: ${t.message} $body" else t.message ?: "Connection failure"
+            val hint = when (code) {
+                404, 1008 -> "Model not found. Try 'Fetch available Live models' in Settings."
+                400, 1007 -> "Invalid setup argument for $modelName."
+                else -> GeminiLiveHandshake.getAuthHintForError(apiKey, "$code $body ${t.message}")
+            }
+            val finalMsg = if (hint != null) "Failed: $baseMsg\nHint: $hint" else "Failed: $baseMsg"
+            resultDeferred.complete(finalMsg)
         }
     })
 
     val outcome = withTimeoutOrNull(10000L) {
         resultDeferred.await()
-    } ?: "Timeout (10s) waiting for Live server"
+    } ?: run {
+        val framesCount = diagnostics?.framesReceivedCount?.value ?: 0
+        if (framesCount == 0) {
+            val hint = GeminiLiveHandshake.getAuthHintForError(apiKey, "Setup timeout")
+            "Timeout (10s): Server sent nothing. Check API key & model.\n${hint ?: ""}"
+        } else {
+            val firstFrame = diagnostics?.firstFrameReceivedContent?.value ?: ""
+            "Timeout (10s): Received $framesCount frame(s) but no setupComplete. Preview: ${firstFrame.take(150)}"
+        }
+    }
 
     try {
         ws.close(1000, "Test finished")
-    } catch (_: Exception) {}
+    } catch (e: Exception) {
+        Log.e("Aura", "Error closing test websocket", e)
+    }
 
     outcome
 }

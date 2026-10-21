@@ -1,15 +1,23 @@
 package com.example.core.root
 
+import android.content.ComponentName
 import android.content.Context
 import android.os.Build
+import android.util.Log
+import com.example.service.AuraAccessibilityService
+import com.example.service.AuraNotificationListener
 import com.topjohnwu.superuser.Shell
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.util.concurrent.TimeUnit
 
 class RootManager(private val context: Context) {
+    companion object {
+        private const val TAG = "Aura"
+    }
 
     init {
         try {
@@ -19,7 +27,9 @@ class RootManager(private val context: Context) {
                     .setFlags(Shell.FLAG_REDIRECT_STDERR)
                     .setTimeout(15)
             )
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            Log.e(TAG, "Error initializing Shell builder", e)
+        }
     }
 
     /**
@@ -130,13 +140,15 @@ class RootManager(private val context: Context) {
             val line = reader.readLine()
             p.waitFor()
             p.exitValue() == 0 && line?.contains("uid=0") == true
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.e(TAG, "checkSuBinaryDirect failed", e)
             false
         }
     }
 
     /**
      * Auto-grants all required permissions, settings, and services in one go via root.
+     * Uses accurate ComponentNames derived from class references (handling decoupled package names).
      */
     suspend fun autoGrantEverything(): Map<String, Boolean> = withContext(Dispatchers.IO) {
         val pkg = context.packageName
@@ -168,8 +180,8 @@ class RootManager(private val context: Context) {
         val batteryRes = execute("dumpsys deviceidle whitelist +$pkg")
         results["BATTERY_OPTIMIZATION"] = batteryRes.success
 
-        // Enable Accessibility Service
-        val accessComponent = "$pkg/$pkg.service.AuraAccessibilityService"
+        // Enable Accessibility Service with real ComponentName
+        val accessComponent = ComponentName(context, AuraAccessibilityService::class.java).flattenToString()
         val existingServices = execute("settings get secure enabled_accessibility_services").stdout.trim()
         val newServices = if (existingServices.isNotBlank() && existingServices != "null") {
             if (existingServices.contains(accessComponent)) existingServices else "$existingServices:$accessComponent"
@@ -178,12 +190,29 @@ class RootManager(private val context: Context) {
         }
         val setAccess = execute("settings put secure enabled_accessibility_services $newServices")
         execute("settings put secure accessibility_enabled 1")
-        results["ACCESSIBILITY_SERVICE"] = setAccess.success
 
-        // Enable Notification Listener
-        val notifComponent = "$pkg/$pkg.service.AuraNotificationListener"
+        // Enable Notification Listener with real ComponentName
+        val notifComponent = ComponentName(context, AuraNotificationListener::class.java).flattenToString()
         val notifRes = execute("cmd notification allow_listener $notifComponent")
-        results["NOTIFICATION_LISTENER"] = notifRes.success
+
+        val existingNotifs = execute("settings get secure enabled_notification_listeners").stdout.trim()
+        val newNotifs = if (existingNotifs.isNotBlank() && existingNotifs != "null") {
+            if (existingNotifs.contains(notifComponent)) existingNotifs else "$existingNotifs:$notifComponent"
+        } else {
+            notifComponent
+        }
+        execute("settings put secure enabled_notification_listeners $newNotifs")
+
+        // Brief delay to allow system service binding
+        delay(500)
+
+        // Verify status
+        val verifiedServices = execute("settings get secure enabled_accessibility_services").stdout.trim()
+        val isAccessEnabled = verifiedServices.contains(accessComponent) || AuraAccessibilityService.isRunning()
+        results["ACCESSIBILITY_SERVICE"] = setAccess.success && isAccessEnabled
+
+        val isNotifRunning = AuraNotificationListener.isRunning()
+        results["NOTIFICATION_LISTENER"] = notifRes.success || isNotifRunning
 
         results
     }

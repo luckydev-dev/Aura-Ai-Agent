@@ -13,6 +13,7 @@ class SafetyLayerTest {
             "rm -rf /",
             "rm -f -r /",
             "rm -rf / --no-preserve-root",
+            "rm --no-preserve-root -rf /",
             "rm --recursive --force /",
             "rm -rf /data",
             "rm -rf /data/*",
@@ -47,9 +48,12 @@ class SafetyLayerTest {
     fun testChainedAndSubshellCatastrophicCommands() {
         val chainedCommands = listOf(
             "ls -la; rm -rf /",
+            "a; rm -rf /",
+            "a && rm -rf /system",
+            "$(rm -rf /)",
+            "echo $(rm -rf /)",
             "echo 'hello' && rm -rf /data/*",
             "dumpsys battery || rm -rf /system",
-            "echo $(rm -rf /)",
             "cat `rm -rf /data`",
             "echo safe \n rm -rf /boot"
         )
@@ -59,6 +63,27 @@ class SafetyLayerTest {
             val assessment = SafetyLayer.evaluateCommand(cmd, requireConfirmation = false)
             assertTrue(
                 "Expected catastrophic assessment for chained '$cmd'",
+                assessment is CommandSafetyAssessment.CatastrophicBlocked
+            )
+        }
+    }
+
+    @Test
+    fun testRequestedSafetyVerificationCases() {
+        // Explicit cases required by user prompt
+        val requiredCases = listOf(
+            "rm -rf /data/*",
+            "a; rm -rf /",
+            "a && rm -rf /system",
+            "$(rm -rf /)",
+            "rm --no-preserve-root -rf /"
+        )
+
+        for (cmd in requiredCases) {
+            assertTrue("Required safety case '$cmd' must be catastrophic", SafetyLayer.isCatastrophic(cmd))
+            val assessment = SafetyLayer.evaluateCommand(cmd, requireConfirmation = false)
+            assertTrue(
+                "Required safety case '$cmd' must be CatastrophicBlocked",
                 assessment is CommandSafetyAssessment.CatastrophicBlocked
             )
         }

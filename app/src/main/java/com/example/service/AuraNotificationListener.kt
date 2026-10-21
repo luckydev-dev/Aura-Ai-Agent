@@ -6,6 +6,7 @@ import android.content.Intent
 import android.os.Bundle
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
+import android.util.Log
 import java.util.concurrent.ConcurrentHashMap
 
 data class CachedNotification(
@@ -21,6 +22,7 @@ data class CachedNotification(
 class AuraNotificationListener : NotificationListenerService() {
 
     companion object {
+        private const val TAG = "Aura"
         private var instance: AuraNotificationListener? = null
         private val notificationCache = ConcurrentHashMap<String, CachedNotification>()
 
@@ -47,7 +49,8 @@ class AuraNotificationListener : NotificationListenerService() {
                     try {
                         action.actionIntent.send(inst, 0, intent)
                         return true
-                    } catch (_: Exception) {
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to send notification reply", e)
                         return false
                     }
                 }
@@ -61,7 +64,8 @@ class AuraNotificationListener : NotificationListenerService() {
                 inst.cancelNotification(key)
                 notificationCache.remove(key)
                 true
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to dismiss notification $key", e)
                 false
             }
         }
@@ -96,7 +100,9 @@ class AuraNotificationListener : NotificationListenerService() {
             for (sbn in active) {
                 cacheSbn(sbn)
             }
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to refresh active notifications", e)
+        }
     }
 
     private fun cacheSbn(sbn: StatusBarNotification) {
@@ -109,7 +115,8 @@ class AuraNotificationListener : NotificationListenerService() {
             val pm = packageManager
             val ai = pm.getApplicationInfo(pkg, 0)
             pm.getApplicationLabel(ai).toString()
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get app label for $pkg", e)
             pkg
         }
 

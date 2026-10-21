@@ -1,5 +1,6 @@
 package com.example.core.live
 
+import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -44,8 +45,45 @@ class LiveDiagnostics {
     private val _audioTrackState = MutableStateFlow("Idle")
     val audioTrackState: StateFlow<String> = _audioTrackState.asStateFlow()
 
+    // Frame logging and stats
+    private val _framesReceivedCount = MutableStateFlow(0)
+    val framesReceivedCount: StateFlow<Int> = _framesReceivedCount.asStateFlow()
+
+    private val _textFramesCount = MutableStateFlow(0)
+    val textFramesCount: StateFlow<Int> = _textFramesCount.asStateFlow()
+
+    private val _binaryFramesCount = MutableStateFlow(0)
+    val binaryFramesCount: StateFlow<Int> = _binaryFramesCount.asStateFlow()
+
+    private val _socketOpenedTimestamp = MutableStateFlow(0L)
+    val socketOpenedTimestamp: StateFlow<Long> = _socketOpenedTimestamp.asStateFlow()
+
+    private val _httpUpgradeResponseCode = MutableStateFlow(0)
+    val httpUpgradeResponseCode: StateFlow<Int> = _httpUpgradeResponseCode.asStateFlow()
+
+    private val _lastFramePreview = MutableStateFlow("None")
+    val lastFramePreview: StateFlow<String> = _lastFramePreview.asStateFlow()
+
+    private val _firstFrameReceivedContent = MutableStateFlow("")
+    val firstFrameReceivedContent: StateFlow<String> = _firstFrameReceivedContent.asStateFlow()
+
+    private val _authKeyType = MutableStateFlow("Not Checked")
+    val authKeyType: StateFlow<String> = _authKeyType.asStateFlow()
+
     private val _logHistory = MutableStateFlow<List<DiagnosticLogEntry>>(emptyList())
     val logHistory: StateFlow<List<DiagnosticLogEntry>> = _logHistory.asStateFlow()
+
+    fun resetForNewConnection() {
+        _setupCompleteArrived.value = false
+        _framesReceivedCount.value = 0
+        _textFramesCount.value = 0
+        _binaryFramesCount.value = 0
+        _socketOpenedTimestamp.value = 0L
+        _httpUpgradeResponseCode.value = 0
+        _lastFramePreview.value = "None"
+        _firstFrameReceivedContent.value = ""
+        _lastServerMessageTypes.value = emptyList()
+    }
 
     fun updateConnectionState(state: String) {
         _connectionState.value = state
@@ -53,6 +91,15 @@ class LiveDiagnostics {
 
     fun setModel(model: String) {
         _currentModel.value = model
+    }
+
+    fun setAuthKey(key: String) {
+        _authKeyType.value = GeminiLiveHandshake.getKeyTypeDescription(key)
+    }
+
+    fun setSocketOpened(httpCode: Int) {
+        _socketOpenedTimestamp.value = System.currentTimeMillis()
+        _httpUpgradeResponseCode.value = httpCode
     }
 
     fun setLastClose(code: Int, reason: String) {
@@ -87,6 +134,26 @@ class LiveDiagnostics {
 
     fun recordAudioReceived(bytes: Long) = addAudioReceivedBytes(bytes)
 
+    fun recordIncomingFrame(isBinary: Boolean, byteLength: Int, rawText: String) {
+        _framesReceivedCount.value += 1
+        if (isBinary) {
+            _binaryFramesCount.value += 1
+        } else {
+            _textFramesCount.value += 1
+        }
+
+        val preview = rawText.take(300)
+        val frameTypeStr = if (isBinary) "BINARY" else "TEXT"
+        _lastFramePreview.value = "[$frameTypeStr $byteLength B] $preview"
+
+        if (_firstFrameReceivedContent.value.isEmpty()) {
+            _firstFrameReceivedContent.value = preview
+        }
+
+        Log.d("Aura", "Live Frame [$frameTypeStr] length=$byteLength: $preview")
+        log("Aura", "Frame [$frameTypeStr] ${byteLength}B: ${preview.take(120)}")
+    }
+
     fun recordServerMessageType(type: String) {
         val time = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
         val current = _lastServerMessageTypes.value.toMutableList()
@@ -105,6 +172,13 @@ class LiveDiagnostics {
         _logHistory.value = list
     }
 
+    fun getUptimeFormatted(): String {
+        val opened = _socketOpenedTimestamp.value
+        if (opened <= 0L) return "Not open"
+        val seconds = (System.currentTimeMillis() - opened) / 1000
+        return "${seconds}s"
+    }
+
     fun getFullLogText(): String {
         val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US)
         val sb = StringBuilder()
@@ -112,7 +186,12 @@ class LiveDiagnostics {
         sb.append("Timestamp: ${sdf.format(Date())}\n")
         sb.append("State: ${_connectionState.value}\n")
         sb.append("Model: ${_currentModel.value}\n")
+        sb.append("Auth: ${_authKeyType.value}\n")
         sb.append("SetupComplete: ${_setupCompleteArrived.value}\n")
+        sb.append("HTTP Upgrade Code: ${_httpUpgradeResponseCode.value}\n")
+        sb.append("Socket Uptime: ${getUptimeFormatted()}\n")
+        sb.append("Frames Received: ${_framesReceivedCount.value} (text ${_textFramesCount.value} / binary ${_binaryFramesCount.value})\n")
+        sb.append("Last Frame: ${_lastFramePreview.value}\n")
         sb.append("Last Close: ${_lastCloseCodeAndReason.value}\n")
         sb.append("Audio Sent: ${_bytesAudioSent.value} bytes\n")
         sb.append("Audio Received: ${_bytesAudioReceived.value} bytes\n")
