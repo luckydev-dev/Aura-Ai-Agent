@@ -512,4 +512,70 @@ object AuraIcons {
             }
         }.build()
     }
+
+    val Copy: ImageVector by lazy {
+        ImageVector.Builder(
+            name = "Copy",
+            defaultWidth = 24.dp,
+            defaultHeight = 24.dp,
+            viewportWidth = 24f,
+            viewportHeight = 24f
+        ).apply {
+            path(fill = SolidColor(Color.White)) {
+                moveTo(16f, 1f)
+                lineTo(4f, 1f)
+                curveTo(2.9f, 1f, 2f, 1.9f, 2f, 3f)
+                lineTo(2f, 17f)
+                lineTo(4f, 17f)
+                lineTo(4f, 3f)
+                lineTo(16f, 3f)
+                lineTo(16f, 1f)
+                close()
+                moveTo(19f, 5f)
+                lineTo(8f, 5f)
+                curveTo(6.9f, 5f, 6f, 5.9f, 6f, 7f)
+                lineTo(6f, 21f)
+                curveTo(6f, 22.1f, 6.9f, 23f, 8f, 23f)
+                lineTo(19f, 23f)
+                curveTo(20.1f, 23f, 21f, 22.1f, 21f, 21f)
+                lineTo(21f, 7f)
+                curveTo(21f, 5.9f, 20.1f, 5f, 19f, 5f)
+                close()
+                moveTo(19f, 21f)
+                lineTo(8f, 21f)
+                lineTo(8f, 7f)
+                lineTo(19f, 7f)
+                lineTo(19f, 21f)
+                close()
+            }
+        }.build()
+    }
+
+    val Refresh: ImageVector by lazy {
+        ImageVector.Builder(
+            name = "Refresh",
+            defaultWidth = 24.dp,
+            defaultHeight = 24.dp,
+            viewportWidth = 24f,
+            viewportHeight = 24f
+        ).apply {
+            path(fill = SolidColor(Color.White)) {
+                moveTo(17.65f, 6.35f)
+                curveTo(16.2f, 4.9f, 14.21f, 4f, 12f, 4f)
+                curveTo(7.58f, 4f, 4.01f, 7.58f, 4.01f, 12f)
+                curveTo(4.01f, 16.42f, 7.58f, 20f, 12f, 20f)
+                curveTo(15.73f, 20f, 18.84f, 17.45f, 19.73f, 14f)
+                lineTo(17.65f, 14f)
+                curveTo(16.83f, 16.33f, 14.61f, 18f, 12f, 18f)
+                curveTo(8.69f, 18f, 6f, 15.31f, 6f, 12f)
+                curveTo(6f, 8.69f, 8.69f, 6f, 12f, 6f)
+                curveTo(13.66f, 6f, 15.14f, 6.69f, 16.22f, 7.78f)
+                lineTo(13f, 11f)
+                lineTo(20f, 11f)
+                lineTo(20f, 4f)
+                lineTo(17.65f, 6.35f)
+                close()
+            }
+        }.build()
+    }
 }

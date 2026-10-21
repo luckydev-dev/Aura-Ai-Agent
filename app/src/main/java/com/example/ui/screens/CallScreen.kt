@@ -16,10 +16,12 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -150,6 +152,9 @@ fun CallScreen(
         }
     }
 
+    // Effective call UI state: call active AND not in terminal/error state
+    val isCallUiActive = isCallActive && connectionState !is LiveConnectionState.Error
+
     var isSpeakerOn by remember { mutableStateOf(true) }
 
     // Synchronize speaker state from preferences
@@ -169,15 +174,14 @@ fun CallScreen(
                 actionFeed[index] = item
             } else {
                 actionFeed.add(0, item)
-                if (actionFeed.size > 20) actionFeed.removeLast()
             }
         }
     }
 
     // Call duration timer
     var callSeconds by remember { mutableStateOf(0) }
-    LaunchedEffect(isCallActive) {
-        if (isCallActive) {
+    LaunchedEffect(isCallUiActive) {
+        if (isCallUiActive) {
             callSeconds = 0
             while (true) {
                 delay(1000)
@@ -190,9 +194,10 @@ fun CallScreen(
 
     // Determine current Orb state
     val orbState = when {
-        !isCallActive -> OrbState.IDLE
-        connectionState is LiveConnectionState.Reconnecting -> OrbState.RECONNECTING
         connectionState is LiveConnectionState.Error -> OrbState.ERROR
+        connectionState is LiveConnectionState.Reconnecting -> OrbState.RECONNECTING
+        connectionState is LiveConnectionState.Connecting -> OrbState.IDLE
+        connectionState !is LiveConnectionState.Connected || !isCallUiActive -> OrbState.IDLE
         isAuraActing -> OrbState.ACTING
         speakerAmp > 0.04f -> OrbState.SPEAKING
         isAuraThinking -> OrbState.THINKING
@@ -250,7 +255,7 @@ fun CallScreen(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     androidx.compose.foundation.text.BasicText(
-                        text = if (isCallActive) "%02d:%02d".format(callSeconds / 60, callSeconds % 60) else "Aura Ready",
+                        text = if (isCallUiActive) "%02d:%02d".format(callSeconds / 60, callSeconds % 60) else "Aura Ready",
                         style = typography.labelSmall.copy(color = colors.textPrimary)
                     )
                 }
@@ -288,14 +293,14 @@ fun CallScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.weight(0.15f))
+            Spacer(modifier = Modifier.weight(0.12f))
 
             // The Hero Aura Living Orb
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clickable {
-                        if (!isCallActive) {
+                        if (!isCallUiActive) {
                             startCallWithPermission()
                         }
                     },
@@ -308,63 +313,132 @@ fun CallScreen(
                 )
             }
 
-            // Orb State Status Label
-            val stateLabel = when (orbState) {
-                OrbState.IDLE -> if (isCallActive) "Listening for you..." else "Tap orb or button to start call"
-                OrbState.LISTENING -> "Hearing you..."
-                OrbState.THINKING -> "Thinking..."
-                OrbState.SPEAKING -> "Speaking..."
-                OrbState.ACTING -> "Operating device..."
-                OrbState.ERROR -> (connectionState as? LiveConnectionState.Error)?.message ?: "Connection error"
-                OrbState.RECONNECTING -> "Reconnecting to Live..."
+            // Orb State Status Label - derived strictly from connectionState
+            val stateLabel = when (connectionState) {
+                is LiveConnectionState.Connecting -> "Connecting..."
+                is LiveConnectionState.Reconnecting -> "Reconnecting..."
+                is LiveConnectionState.Connected -> when {
+                    speakerAmp > 0.04f -> "Speaking..."
+                    isAuraActing -> "Operating device..."
+                    isAuraThinking -> "Thinking..."
+                    micAmp > 0.04f && !isMuted -> "Hearing you..."
+                    else -> "Listening for you..."
+                }
+                is LiveConnectionState.Error -> "Connection error"
+                LiveConnectionState.Disconnected -> if (isCallUiActive) "Connecting..." else "Tap orb or button to start call"
             }
+
             Spacer(modifier = Modifier.height(16.dp))
             androidx.compose.foundation.text.BasicText(
                 text = stateLabel,
                 style = typography.labelLarge.copy(
                     color = if (orbState == OrbState.ERROR) colors.danger else colors.accentStart
                 ),
-                maxLines = 2
+                maxLines = 1
             )
 
-            Spacer(modifier = Modifier.weight(0.15f))
+            Spacer(modifier = Modifier.weight(0.12f))
 
-            // Realtime Live Captions
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 70.dp, max = 120.dp)
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(colors.surface.copy(alpha = 0.6f))
-                    .border(1.dp, colors.border, RoundedCornerShape(16.dp))
-                    .padding(14.dp),
-                verticalArrangement = Arrangement.Center,
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                if (connectionState is LiveConnectionState.Error) {
-                    val err = (connectionState as LiveConnectionState.Error).message
-                    androidx.compose.foundation.text.BasicText(
-                        text = "Error: $err",
-                        style = typography.bodyMedium.copy(color = colors.danger),
-                        maxLines = 3
-                    )
-                } else if (modelTranscript.isNotBlank()) {
-                    androidx.compose.foundation.text.BasicText(
-                        text = modelTranscript,
-                        style = typography.bodyLarge.copy(color = colors.textPrimary),
-                        maxLines = 3
-                    )
-                } else if (userTranscript.isNotBlank()) {
-                    androidx.compose.foundation.text.BasicText(
-                        text = userTranscript,
-                        style = typography.bodyMedium.copy(color = colors.textSecondary),
-                        maxLines = 2
-                    )
-                } else {
-                    androidx.compose.foundation.text.BasicText(
-                        text = if (isCallActive) "Speak naturally. You can interrupt Aura anytime." else "Say 'Open WhatsApp', 'Turn on Bluetooth', 'Read screen'...",
-                        style = typography.bodySmall.copy(color = colors.textTertiary)
-                    )
+            // Realtime Captions OR Full Scrollable Error Card
+            if (connectionState is LiveConnectionState.Error) {
+                val errorMsg = (connectionState as LiveConnectionState.Error).message
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(colors.surface.copy(alpha = 0.85f))
+                        .border(1.dp, colors.danger.copy(alpha = 0.6f), RoundedCornerShape(16.dp))
+                        .padding(14.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .clip(CircleShape)
+                                .background(colors.danger)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        androidx.compose.foundation.text.BasicText(
+                            text = "Error details",
+                            style = typography.labelLarge.copy(color = colors.danger)
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 130.dp)
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                        androidx.compose.foundation.text.BasicText(
+                            text = errorMsg,
+                            style = typography.bodySmall.copy(color = colors.textPrimary)
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        AuraButton(
+                            text = "Copy Error",
+                            onClick = {
+                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                                val clip = android.content.ClipData.newPlainText("Aura Error", errorMsg)
+                                clipboard.setPrimaryClip(clip)
+                                Toast.makeText(context, "Error copied to clipboard", Toast.LENGTH_SHORT).show()
+                            },
+                            modifier = Modifier.weight(1f),
+                            icon = AuraIcons.Copy,
+                            isPrimary = false,
+                            testTag = "copy_error_btn"
+                        )
+                        AuraButton(
+                            text = "Retry",
+                            onClick = {
+                                startCallWithPermission()
+                            },
+                            modifier = Modifier.weight(1f),
+                            icon = AuraIcons.Refresh,
+                            isPrimary = true,
+                            testTag = "retry_call_btn"
+                        )
+                    }
+                }
+            } else {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 70.dp, max = 120.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(colors.surface.copy(alpha = 0.6f))
+                        .border(1.dp, colors.border, RoundedCornerShape(16.dp))
+                        .padding(14.dp),
+                    verticalArrangement = Arrangement.Center,
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    if (modelTranscript.isNotBlank()) {
+                        androidx.compose.foundation.text.BasicText(
+                            text = modelTranscript,
+                            style = typography.bodyLarge.copy(color = colors.textPrimary),
+                            maxLines = 3
+                        )
+                    } else if (userTranscript.isNotBlank()) {
+                        androidx.compose.foundation.text.BasicText(
+                            text = userTranscript,
+                            style = typography.bodyMedium.copy(color = colors.textSecondary),
+                            maxLines = 2
+                        )
+                    } else {
+                        androidx.compose.foundation.text.BasicText(
+                            text = if (isCallUiActive) "Speak naturally. You can interrupt Aura anytime." else "Say 'Open WhatsApp', 'Turn on Bluetooth', 'Read screen'...",
+                            style = typography.bodySmall.copy(color = colors.textTertiary)
+                        )
+                    }
                 }
             }
 
@@ -461,7 +535,7 @@ fun CallScreen(
                                         }
                                         break
                                     } else if (!isHolding && System.currentTimeMillis() - startTime >= 350) {
-                                        // Held down for 350ms -> Push-to-Talk unmutes!
+                                        // Held down for 350ms -> Push-to-Talk unmutes
                                         isHolding = true
                                         service?.audioStreamer?.setMuted(false)
                                     }
@@ -483,9 +557,9 @@ fun CallScreen(
                     modifier = Modifier
                         .size(76.dp)
                         .clip(CircleShape)
-                        .background(if (isCallActive) colors.danger else colors.accentStart)
+                        .background(if (isCallUiActive) colors.danger else colors.accentStart)
                         .clickable {
-                            if (isCallActive) {
+                            if (isCallUiActive) {
                                 AuraForegroundService.endCall(context)
                             } else {
                                 startCallWithPermission()
@@ -494,8 +568,8 @@ fun CallScreen(
                     contentAlignment = Alignment.Center
                 ) {
                     androidx.compose.foundation.Image(
-                        imageVector = if (isCallActive) AuraIcons.CallEnd else AuraIcons.Mic,
-                        contentDescription = if (isCallActive) "End Call" else "Start Call",
+                        imageVector = if (isCallUiActive) AuraIcons.CallEnd else AuraIcons.Mic,
+                        contentDescription = if (isCallUiActive) "End Call" else "Start Call",
                         colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Color.White),
                         modifier = Modifier.size(36.dp)
                     )
@@ -521,75 +595,89 @@ fun CallScreen(
                             service?.preferences?.setUseSpeaker(newSpeakerState)
                         }
                     },
-                    contentDescription = "Speakerphone",
-                    backgroundColor = if (isSpeakerOn) colors.accentStart.copy(alpha = 0.25f) else colors.surfaceRaised,
-                    tint = if (isSpeakerOn) colors.accentStart else colors.textPrimary,
+                    contentDescription = if (isSpeakerOn) "Switch to Earpiece" else "Switch to Speaker",
+                    backgroundColor = if (isSpeakerOn) colors.surfaceRaised else colors.accentStart.copy(alpha = 0.2f),
+                    tint = if (isSpeakerOn) colors.textPrimary else colors.accentStart,
                     size = 52.dp,
                     testTag = "speaker_toggle_btn"
                 )
             }
         }
 
-        // Keyboard text overlay sheet (with proper imePadding so it sits on top of soft keyboard)
-        if (showKeyboardInput) {
-            Box(
+        // Slide-up Keyboard Chat Sheet
+        AnimatedVisibility(
+            visible = showKeyboardInput,
+            enter = slideInVertically { it } + fadeIn(),
+            exit = slideOutVertically { it } + fadeOut(),
+            modifier = Modifier.align(Alignment.BottomCenter)
+        ) {
+            Column(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.5f))
-                    .clickable { showKeyboardInput = false },
-                contentAlignment = Alignment.BottomCenter
+                    .fillMaxWidth()
+                    .imePadding()
+                    .navigationBarsPadding()
+                    .clip(RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp))
+                    .background(colors.surfaceRaised)
+                    .border(1.dp, colors.border, RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp))
+                    .padding(20.dp)
             ) {
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp))
-                        .background(colors.surface)
-                        .clickable(enabled = false) {}
-                        .padding(16.dp)
-                        .navigationBarsPadding()
-                        .imePadding(),
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    androidx.compose.foundation.text.BasicText(
+                        text = "Type to Aura",
+                        style = typography.titleMedium.copy(color = colors.textPrimary)
+                    )
+                    AuraIconButton(
+                        icon = AuraIcons.Close,
+                        onClick = { showKeyboardInput = false },
+                        contentDescription = "Close text input",
+                        size = 32.dp
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     AuraTextField(
                         value = keyboardText,
                         onValueChange = { keyboardText = it },
-                        placeholder = "Type command or message to Aura...",
                         modifier = Modifier.weight(1f),
+                        placeholder = "Ask Aura something or give a command...",
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                         keyboardActions = KeyboardActions(
                             onSend = {
                                 if (keyboardText.isNotBlank()) {
-                                    val textToSend = keyboardText
+                                    val msg = keyboardText.trim()
                                     keyboardText = ""
                                     showKeyboardInput = false
-                                    if (!isCallActive) {
-                                        startCallWithPermission()
-                                    }
-                                    service?.liveClient?.sendTextMessage(textToSend)
+                                    service?.liveClient?.sendTextMessage(msg)
                                 }
                             }
                         ),
                         testTag = "keyboard_input_field"
                     )
-                    Spacer(modifier = Modifier.width(10.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
                     AuraIconButton(
                         icon = AuraIcons.Send,
                         onClick = {
                             if (keyboardText.isNotBlank()) {
-                                val textToSend = keyboardText
+                                val msg = keyboardText.trim()
                                 keyboardText = ""
                                 showKeyboardInput = false
-                                if (!isCallActive) {
-                                    startCallWithPermission()
-                                }
-                                service?.liveClient?.sendTextMessage(textToSend)
+                                service?.liveClient?.sendTextMessage(msg)
                             }
                         },
-                        contentDescription = "Send",
+                        contentDescription = "Send Message",
                         backgroundColor = colors.accentStart,
                         tint = Color.White,
-                        size = 46.dp,
-                        testTag = "send_text_btn"
+                        size = 48.dp,
+                        testTag = "keyboard_send_btn"
                     )
                 }
             }

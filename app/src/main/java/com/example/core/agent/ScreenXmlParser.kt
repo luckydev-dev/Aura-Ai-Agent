@@ -20,6 +20,7 @@ object ScreenXmlParser {
 
     /**
      * Parses uiautomator dump XML into a compact list of interactive or informative nodes.
+     * Supports both Android XmlPullParser and fallback regex parser for local JVM testing.
      */
     fun parse(xmlContent: String): List<ScreenNode> {
         val nodes = mutableListOf<ScreenNode>()
@@ -65,8 +66,52 @@ object ScreenXmlParser {
                 }
                 eventType = parser.next()
             }
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {
+            // Fallback for JVM unit tests without Android XML implementation
+            return parseFallback(xmlContent)
+        }
 
+        if (nodes.isEmpty() && xmlContent.contains("<node")) {
+            return parseFallback(xmlContent)
+        }
+
+        return nodes
+    }
+
+    private fun parseFallback(xmlContent: String): List<ScreenNode> {
+        val nodes = mutableListOf<ScreenNode>()
+        val nodeMatches = Regex("""<node\s+([^>]*)/?>""", RegexOption.DOT_MATCHES_ALL).findAll(xmlContent)
+        for (match in nodeMatches) {
+            val attrStr = match.groupValues[1]
+            val attrs = mutableMapOf<String, String>()
+            Regex("""([a-zA-Z0-9_\-:]+)="([^"]*)"""").findAll(attrStr).forEach {
+                attrs[it.groupValues[1]] = it.groupValues[2]
+            }
+            val text = attrs["text"] ?: ""
+            val contentDesc = attrs["content-desc"] ?: ""
+            val resourceId = attrs["resource-id"] ?: ""
+            val className = attrs["class"] ?: ""
+            val bounds = attrs["bounds"] ?: ""
+            val clickable = (attrs["clickable"] ?: "false").equals("true", ignoreCase = true)
+            val focusable = (attrs["focusable"] ?: "false").equals("true", ignoreCase = true)
+            val (cx, cy) = parseCenter(bounds)
+
+            if (text.isNotBlank() || contentDesc.isNotBlank() || resourceId.isNotBlank() || clickable || focusable) {
+                nodes.add(
+                    ScreenNode(
+                        text = text.trim(),
+                        contentDescription = contentDesc.trim(),
+                        resourceId = resourceId.substringAfterLast("/"),
+                        className = className.substringAfterLast("."),
+                        bounds = bounds,
+                        centerX = cx,
+                        centerY = cy,
+                        isClickable = clickable,
+                        isFocusable = focusable
+                    )
+                )
+            }
+        }
         return nodes
     }
 

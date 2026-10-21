@@ -79,9 +79,13 @@ class LiveDiagnostics {
         _bytesAudioSent.value += bytes
     }
 
+    fun recordAudioSent(bytes: Long) = addAudioSentBytes(bytes)
+
     fun addAudioReceivedBytes(bytes: Long) {
         _bytesAudioReceived.value += bytes
     }
+
+    fun recordAudioReceived(bytes: Long) = addAudioReceivedBytes(bytes)
 
     fun recordServerMessageType(type: String) {
         val time = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())
@@ -90,6 +94,8 @@ class LiveDiagnostics {
         if (current.size > 50) current.removeLast()
         _lastServerMessageTypes.value = current
     }
+
+    fun recordMessage(type: String) = recordServerMessageType(type)
 
     fun log(tag: String, message: String) {
         val entry = DiagnosticLogEntry(System.currentTimeMillis(), tag, message)

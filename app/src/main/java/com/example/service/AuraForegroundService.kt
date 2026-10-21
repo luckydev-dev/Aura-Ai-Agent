@@ -14,6 +14,7 @@ import com.example.core.agent.AgentLoop
 import com.example.core.audio.AudioRecordStreamer
 import com.example.core.audio.AudioTrackPlayer
 import com.example.core.live.GeminiLiveClient
+import com.example.core.live.LiveConnectionState
 import com.example.core.memory.MemoryRepository
 import com.example.core.root.RootManager
 import com.example.core.settings.AuraPreferences
@@ -160,6 +161,17 @@ class AuraForegroundService : Service() {
 
             audioPlayer.start(serviceScope)
             audioStreamer.start(serviceScope)
+
+            // Listen for errors to release mic/speaker and reset active call state
+            launch {
+                liveClient.connectionState.collect { state ->
+                    if (state is LiveConnectionState.Error) {
+                        _isCallActive.value = false
+                        audioStreamer.stop()
+                        audioPlayer.stop()
+                    }
+                }
+            }
 
             liveClient.connect(serviceScope, apiKey, model, voice, fullPrompt)
         }
