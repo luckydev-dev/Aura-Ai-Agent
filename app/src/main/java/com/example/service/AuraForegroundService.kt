@@ -4,30 +4,38 @@ import android.app.*
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.media.AudioAttributes
-import android.media.AudioFocusRequest
-import android.media.AudioManager
-import android.os.Build
-import android.os.IBinder
-import android.os.PowerManager
+import android.media.*
+import android.os.*
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import com.example.AuraApplication
 import com.example.MainActivity
 import com.example.R
 import com.example.core.agent.AgentLoop
-import com.example.core.audio.AudioRecordStreamer
-import com.example.core.audio.AudioTrackPlayer
+import com.example.core.agent.PersonaBuilder
+import com.example.core.audio.*
 import com.example.core.live.GeminiLiveClient
 import com.example.core.live.LiveConnectionState
 import com.example.core.memory.MemoryRepository
+import com.example.core.root.PermissionDoctor
 import com.example.core.root.RootManager
 import com.example.core.settings.AuraPreferences
+import com.example.core.tools.AppInventory
 import com.example.core.tools.ToolRegistry
+import com.example.ui.overlay.EdgeLightingOverlay
+import com.example.ui.overlay.OverlayController
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
+
+enum class ServiceMode {
+    STOPPED,
+    WAKE_LISTENING,
+    IN_CALL
+}
 
 class AuraForegroundService : Service() {
 
@@ -36,6 +44,8 @@ class AuraForegroundService : Service() {
 
         const val ACTION_START_CALL = "com.example.aura.START_CALL"
         const val ACTION_END_CALL = "com.example.aura.END_CALL"
+        const val ACTION_START_WAKE_LISTENING = "com.example.aura.START_WAKE_LISTENING"
+        const val ACTION_STOP_SERVICE = "com.example.aura.STOP_SERVICE"
         const val ACTION_TOGGLE_MUTE = "com.example.aura.TOGGLE_MUTE"
         const val ACTION_TOGGLE_SPEAKER = "com.example.aura.TOGGLE_SPEAKER"
 
@@ -44,6 +54,9 @@ class AuraForegroundService : Service() {
 
         private val _isCallActive = MutableStateFlow(false)
         val isCallActive: StateFlow<Boolean> = _isCallActive.asStateFlow()
+
+        private val _serviceMode = MutableStateFlow(ServiceMode.STOPPED)
+        val serviceMode: StateFlow<ServiceMode> = _serviceMode.asStateFlow()
 
         var currentService: AuraForegroundService? = null
             private set
@@ -65,6 +78,24 @@ class AuraForegroundService : Service() {
             }
             context.startService(intent)
         }
+
+        fun startWakeListening(context: Context) {
+            val intent = Intent(context, AuraForegroundService::class.java).apply {
+                action = ACTION_START_WAKE_LISTENING
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
+        }
+
+        fun stopServiceCompletely(context: Context) {
+            val intent = Intent(context, AuraForegroundService::class.java).apply {
+                action = ACTION_STOP_SERVICE
+            }
+            context.startService(intent)
+        }
     }
 
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
@@ -75,11 +106,18 @@ class AuraForegroundService : Service() {
     lateinit var preferences: AuraPreferences
     lateinit var memoryRepository: MemoryRepository
     lateinit var rootManager: RootManager
+    lateinit var permissionDoctor: PermissionDoctor
+    lateinit var appInventory: AppInventory
     lateinit var toolRegistry: ToolRegistry
     lateinit var audioStreamer: AudioRecordStreamer
     lateinit var audioPlayer: AudioTrackPlayer
     lateinit var liveClient: GeminiLiveClient
     lateinit var agentLoop: AgentLoop
+    lateinit var voskModelManager: VoskModelManager
+    lateinit var wakePhraseDetector: WakePhraseDetector
+    lateinit var overlayController: OverlayController
+
+    private val diagnostics get() = AuraApplication.instance.liveDiagnostics
 
     override fun onCreate() {
         super.onCreate()
@@ -88,15 +126,52 @@ class AuraForegroundService : Service() {
         preferences = AuraPreferences(this)
         memoryRepository = MemoryRepository(this)
         rootManager = RootManager(this)
+        permissionDoctor = PermissionDoctor(this, rootManager)
+        appInventory = AppInventory(this, rootManager)
         agentLoop = AgentLoop(rootManager)
-        toolRegistry = ToolRegistry(this, rootManager, preferences, memoryRepository, agentLoop)
-        audioPlayer = AudioTrackPlayer(this)
+        voskModelManager = VoskModelManager(this)
 
+        audioPlayer = AudioTrackPlayer(this)
         audioStreamer = AudioRecordStreamer { base64Chunk ->
             liveClient.sendAudioChunk(base64Chunk)
         }
 
-        liveClient = GeminiLiveClient(toolRegistry, audioPlayer)
+        wakePhraseDetector = WakePhraseDetector(this, voskModelManager) {
+            handleWakePhraseDetected()
+        }
+
+        toolRegistry = ToolRegistry(
+            context = this,
+            rootManager = rootManager,
+            preferences = preferences,
+            memoryRepository = memoryRepository,
+            agentLoop = agentLoop,
+            appInventory = appInventory,
+            permissionDoctor = permissionDoctor,
+            onLanguageChange = { newLang ->
+                liveClient.reconnectWith(newLang = newLang)
+            },
+            onVoiceChange = { newVoice ->
+                liveClient.reconnectWith(newVoice = newVoice)
+            },
+            onEndCall = {
+                terminateCall()
+            }
+        )
+
+        liveClient = GeminiLiveClient(toolRegistry, audioPlayer).apply {
+            onSilenceTimeoutListener = {
+                terminateCall()
+            }
+        }
+
+        overlayController = OverlayController(
+            context = this,
+            preferences = preferences,
+            overlayManager = AuraApplication.instance.overlayManager,
+            edgeLightingOverlay = EdgeLightingOverlay(this)
+        )
+        overlayController.startObserving()
 
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Aura:CallWakeLock").apply {
@@ -104,6 +179,66 @@ class AuraForegroundService : Service() {
         }
 
         createNotificationChannel()
+        observeLiveState()
+    }
+
+    private fun observeLiveState() {
+        serviceScope.launch {
+            liveClient.captionState.collectLatest { caption ->
+                overlayController.updateCaptions(caption)
+            }
+        }
+
+        serviceScope.launch {
+            audioStreamer.micAmplitude.collectLatest { mic ->
+                overlayController.updateAmplitudes(mic, audioPlayer.speakerAmplitude.value)
+            }
+        }
+
+        serviceScope.launch {
+            audioPlayer.speakerAmplitude.collectLatest { spk ->
+                overlayController.updateAmplitudes(audioStreamer.micAmplitude.value, spk)
+                audioStreamer.isAuraSpeaking = spk > 0.04f
+            }
+        }
+
+        serviceScope.launch {
+            preferences.headphonesMode.collectLatest { hp ->
+                audioStreamer.isHeadphonesMode = hp
+            }
+        }
+
+        serviceScope.launch {
+            preferences.noiseGateStrength.collectLatest { strength ->
+                audioStreamer.noiseGateStrength = strength
+            }
+        }
+
+        serviceScope.launch {
+            audioStreamer.noiseFloor.collectLatest { nf ->
+                diagnostics.setNoiseFloor(nf)
+            }
+        }
+
+        serviceScope.launch {
+            audioStreamer.isGateOpen.collectLatest { isOpen ->
+                diagnostics.setGateStatus(isOpen, audioStreamer.gatedFramesCount.value)
+            }
+        }
+
+        serviceScope.launch {
+            liveClient.connectionState.collectLatest { state ->
+                overlayController.updateCallState(
+                    isCallActive = _isCallActive.value,
+                    connectionState = state,
+                    isAuraActing = liveClient.isAuraActing.value,
+                    isAuraThinking = liveClient.isAuraThinking.value,
+                    isMuted = audioStreamer.isMuted.value,
+                    speakerAmp = audioPlayer.speakerAmplitude.value
+                )
+                updateNotification()
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -112,8 +247,15 @@ class AuraForegroundService : Service() {
                 startForegroundNotification()
                 initiateCall()
             }
+            ACTION_START_WAKE_LISTENING -> {
+                startForegroundNotification()
+                initiateWakeListening()
+            }
             ACTION_END_CALL -> {
                 terminateCall()
+            }
+            ACTION_STOP_SERVICE -> {
+                stopForegroundAndSelf()
             }
             ACTION_TOGGLE_MUTE -> {
                 val current = audioStreamer.isMuted.value
@@ -129,39 +271,75 @@ class AuraForegroundService : Service() {
                 }
             }
         }
-        return START_NOT_STICKY
+        return START_STICKY
     }
 
-    private fun startForegroundNotification() {
-        val notification = buildNotification()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-            )
-        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
+    private fun handleWakePhraseDetected() {
+        serviceScope.launch(Dispatchers.Main) {
+            Log.i(TAG, "Wake word triggered! Transitioning from WAKE_LISTENING to IN_CALL")
+
+            // 1. Chime + Haptic
+            playWakeFeedback()
+
+            // 2. Start call directly in same service
+            initiateCall()
+        }
+    }
+
+    private fun playWakeFeedback() {
+        try {
+            // Haptic
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val vibrator = getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+                vibrator?.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 40, 50, 60), -1))
+            }
+
+            // Audio Chime
+            val toneGen = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 80)
+            toneGen.startTone(ToneGenerator.TONE_PROP_BEEP2, 120)
+            serviceScope.launch {
+                delay(200)
+                toneGen.release()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error playing wake feedback: ${e.message}", e)
+        }
+    }
+
+    private fun initiateWakeListening() {
+        _isCallActive.value = false
+        _serviceMode.value = ServiceMode.WAKE_LISTENING
+        diagnostics.setWakeWordState("Listening for 'Hey Aura'")
+
+        // Stop call audio capture & player if active
+        audioStreamer.stop()
+        audioPlayer.stop()
+        abandonVoiceAudioFocus()
+
+        serviceScope.launch {
+            val sensitivity = preferences.wakeWordSensitivity.first()
+            wakePhraseDetector.sensitivity = sensitivity
+            val started = wakePhraseDetector.startListening(serviceScope)
+            if (started) {
+                diagnostics.setWakeWordState("Active ('Hey Aura')")
+            } else {
+                diagnostics.setWakeWordState("Idle / Model Not Ready")
+            }
+            updateNotification()
         }
     }
 
     private fun requestVoiceAudioFocus() {
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                val playbackAttributes = AudioAttributes.Builder()
+                val playbackAttrs = AudioAttributes.Builder()
                     .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
                     .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                     .build()
 
                 val focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
-                    .setAudioAttributes(playbackAttributes)
-                    .setAcceptsDelayedFocusGain(true)
+                    .setAudioAttributes(playbackAttrs)
+                    .setAcceptsDelayedFocusGain(false)
                     .setOnAudioFocusChangeListener { focusChange ->
                         Log.d(TAG, "Voice audio focus changed: $focusChange")
                     }
@@ -201,7 +379,13 @@ class AuraForegroundService : Service() {
 
     private fun initiateCall() {
         if (_isCallActive.value) return
+
+        // 1. CRITICAL: Stop and release wake detector before call capture starts
+        wakePhraseDetector.stopListening()
+        diagnostics.setWakeWordState("Call Active")
+
         _isCallActive.value = true
+        _serviceMode.value = ServiceMode.IN_CALL
         wakeLock?.acquire(3 * 3600 * 1000L) // 3h max
 
         requestVoiceAudioFocus()
@@ -211,9 +395,20 @@ class AuraForegroundService : Service() {
             val model = preferences.modelName.first()
             val voice = preferences.voiceName.first()
             val thinkingLevel = preferences.thinkingLevel.first()
-            val basePersona = preferences.systemInstruction.first()
-            val memoryContext = memoryRepository.buildMemoryContextSummary()
-            val fullPrompt = if (memoryContext.isNotBlank()) "$basePersona\n\n$memoryContext" else basePersona
+            val language = preferences.defaultLanguage.first()
+            val interruptionSens = preferences.interruptionSensitivity.first()
+            val allowInterrupt = preferences.allowInterrupting.first()
+            val greet = preferences.greetOnConnect.first()
+            val autoHangup = preferences.autoHangupSeconds.first()
+            val unsupported = preferences.unsupportedSetupFields.first()
+
+            // Assembles fresh system instruction with AppInventory & device context
+            val fullPrompt = PersonaBuilder.assembleSystemInstruction(
+                context = this@AuraForegroundService,
+                preferences = preferences,
+                memoryRepository = memoryRepository,
+                appInventory = appInventory
+            )
 
             val useSpeaker = preferences.useSpeaker.first()
             audioPlayer.setSpeakerphoneOn(useSpeaker)
@@ -221,7 +416,10 @@ class AuraForegroundService : Service() {
             audioPlayer.start(serviceScope)
             audioStreamer.start(serviceScope)
 
-            // Listen for errors to release mic/speaker/audio focus and reset active call state
+            // Silent health check right after starting call
+            permissionDoctor.runSilentHealthCheck()
+
+            // Listen for errors to release mic/speaker and reset active call state
             launch {
                 liveClient.connectionState.collect { state ->
                     if (state is LiveConnectionState.Error) {
@@ -229,11 +427,25 @@ class AuraForegroundService : Service() {
                         audioStreamer.stop()
                         audioPlayer.stop()
                         abandonVoiceAudioFocus()
+                        checkReturnToWakeListening()
                     }
                 }
             }
 
-            liveClient.connect(serviceScope, apiKey, model, voice, fullPrompt, thinkingLevel)
+            liveClient.connect(
+                coroutineScope = serviceScope,
+                apiKey = apiKey,
+                model = model,
+                voice = voice,
+                systemPrompt = fullPrompt,
+                thinkingLevel = thinkingLevel,
+                language = language,
+                interruptionSensitivity = interruptionSens,
+                allowInterrupt = allowInterrupt,
+                greet = greet,
+                autoHangup = autoHangup,
+                unsupported = unsupported
+            )
         }
     }
 
@@ -252,72 +464,152 @@ class AuraForegroundService : Service() {
             Log.e(TAG, "Error releasing wakeLock", e)
         }
 
+        checkReturnToWakeListening()
+    }
+
+    private fun checkReturnToWakeListening() {
+        serviceScope.launch {
+            val wakeEnabled = preferences.wakePhraseEnabled.first()
+            if (wakeEnabled) {
+                Log.i(TAG, "Wake word enabled in settings. Returning to WAKE_LISTENING mode.")
+                initiateWakeListening()
+            } else {
+                Log.i(TAG, "Wake word disabled. Stopping foreground service completely.")
+                stopForegroundAndSelf()
+            }
+        }
+    }
+
+    private fun stopForegroundAndSelf() {
+        _isCallActive.value = false
+        _serviceMode.value = ServiceMode.STOPPED
+        wakePhraseDetector.stopListening()
+        overlayController.hideAll()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
+    }
+
+    private fun startForegroundNotification() {
+        val notification = buildNotification()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            )
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+    }
+
+    private fun updateNotification() {
+        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        try {
+            notificationManager.notify(NOTIFICATION_ID, buildNotification())
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to update notification: ${e.message}", e)
+        }
+    }
+
+    private fun buildNotification(): Notification {
+        val openAppIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pendingOpen = PendingIntent.getActivity(
+            this, 0, openAppIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val endCallIntent = Intent(this, AuraForegroundService::class.java).apply {
+            action = ACTION_END_CALL
+        }
+        val pendingEnd = PendingIntent.getService(
+            this, 1, endCallIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val toggleMuteIntent = Intent(this, AuraForegroundService::class.java).apply {
+            action = ACTION_TOGGLE_MUTE
+        }
+        val pendingMute = PendingIntent.getService(
+            this, 2, toggleMuteIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val isMuted = if (::audioStreamer.isInitialized) audioStreamer.isMuted.value else false
+        val isCall = _isCallActive.value
+
+        val title = if (isCall) "Aura Live Voice Call Active" else "Aura: Say 'Hey Aura'"
+        val text = if (isCall) {
+            when (liveClient.connectionState.value) {
+                is LiveConnectionState.Connected -> if (isMuted) "Microphone Muted - Tap to speak" else "Streaming audio bidirectional"
+                is LiveConnectionState.Connecting -> "Connecting to Live Gemini..."
+                is LiveConnectionState.Reconnecting -> "Reconnecting session..."
+                is LiveConnectionState.Error -> "Connection error"
+                else -> "Call session initialized"
+            }
+        } else {
+            "Listening for 'Hey Aura' in background"
+        }
+
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentIntent(pendingOpen)
+            .setOngoing(true)
+            .setPriority(if (isCall) NotificationCompat.PRIORITY_HIGH else NotificationCompat.PRIORITY_LOW)
+
+        if (isCall) {
+            builder.addAction(
+                if (isMuted) android.R.drawable.ic_lock_silent_mode else android.R.drawable.ic_btn_speak_now,
+                if (isMuted) "Unmute" else "Mute",
+                pendingMute
+            )
+            builder.addAction(android.R.drawable.ic_menu_close_clear_cancel, "End Call", pendingEnd)
+        } else {
+            val startCallIntent = Intent(this, AuraForegroundService::class.java).apply {
+                action = ACTION_START_CALL
+            }
+            val pendingStartCall = PendingIntent.getService(
+                this, 3, startCallIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            builder.addAction(android.R.drawable.ic_btn_speak_now, "Start Call", pendingStartCall)
+        }
+
+        return builder.build()
     }
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "Aura Live Call",
+                "Aura Live Voice Session",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Shows status of active voice session"
-                setSound(null, null)
-                enableVibration(false)
+                description = "Shows active realtime Gemini Live and Wake Word session"
+                setShowBadge(false)
             }
-            val manager = getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(channel)
+            val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            notificationManager.createNotificationChannel(channel)
         }
-    }
-
-    private fun buildNotification(): Notification {
-        val contentIntent = PendingIntent.getActivity(
-            this,
-            0,
-            Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
-
-        val endCallIntent = PendingIntent.getService(
-            this,
-            1,
-            Intent(this, AuraForegroundService::class.java).apply { action = ACTION_END_CALL },
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
-
-        val muteIntent = PendingIntent.getService(
-            this,
-            2,
-            Intent(this, AuraForegroundService::class.java).apply { action = ACTION_TOGGLE_MUTE },
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
-
-        val isMuted = if (::audioStreamer.isInitialized) audioStreamer.isMuted.value else false
-
-        return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher_round)
-            .setContentTitle("Aura Live Voice")
-            .setContentText(if (isMuted) "Microphone Muted" else "Connected — Listening & Ready")
-            .setContentIntent(contentIntent)
-            .setOngoing(true)
-            .addAction(0, if (isMuted) "Unmute" else "Mute", muteIntent)
-            .addAction(0, "End Call", endCallIntent)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .build()
-    }
-
-    private fun updateNotification() {
-        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        manager.notify(NOTIFICATION_ID, buildNotification())
     }
 
     override fun onDestroy() {
         super.onDestroy()
         currentService = null
-        serviceScope.cancel()
         terminateCall()
+        wakePhraseDetector.release()
+        appInventory.destroy()
+        overlayController.destroy()
+        serviceScope.cancel()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null

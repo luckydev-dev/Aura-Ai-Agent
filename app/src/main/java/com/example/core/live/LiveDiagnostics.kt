@@ -21,6 +21,12 @@ class LiveDiagnostics {
     private val _currentModel = MutableStateFlow("gemini-3.8-live")
     val currentModel: StateFlow<String> = _currentModel.asStateFlow()
 
+    private val _currentVoice = MutableStateFlow("Aoede")
+    val currentVoice: StateFlow<String> = _currentVoice.asStateFlow()
+
+    private val _currentLanguage = MutableStateFlow("Hinglish")
+    val currentLanguage: StateFlow<String> = _currentLanguage.asStateFlow()
+
     private val _lastCloseCodeAndReason = MutableStateFlow("None")
     val lastCloseCodeAndReason: StateFlow<String> = _lastCloseCodeAndReason.asStateFlow()
 
@@ -70,6 +76,40 @@ class LiveDiagnostics {
     private val _authKeyType = MutableStateFlow("Not Checked")
     val authKeyType: StateFlow<String> = _authKeyType.asStateFlow()
 
+    // Wake Word & Model Download
+    private val _wakeWordState = MutableStateFlow("Idle")
+    val wakeWordState: StateFlow<String> = _wakeWordState.asStateFlow()
+
+    private val _modelDownloadState = MutableStateFlow("Ready")
+    val modelDownloadState: StateFlow<String> = _modelDownloadState.asStateFlow()
+
+    // Noise gate & Audio stats
+    private val _noiseFloor = MutableStateFlow("120 RMS")
+    val noiseFloor: StateFlow<String> = _noiseFloor.asStateFlow()
+
+    private val _noiseGateStatus = MutableStateFlow("Closed")
+    val noiseGateStatus: StateFlow<String> = _noiseGateStatus.asStateFlow()
+
+    private val _recentInterruptionsCount = MutableStateFlow(0)
+    val recentInterruptionsCount: StateFlow<Int> = _recentInterruptionsCount.asStateFlow()
+
+    // Captions & Overlay
+    private val _captionTurnInfo = MutableStateFlow("Turn 0")
+    val captionTurnInfo: StateFlow<String> = _captionTurnInfo.asStateFlow()
+
+    private val _overlayStateInfo = MutableStateFlow("Inactive")
+    val overlayStateInfo: StateFlow<String> = _overlayStateInfo.asStateFlow()
+
+    // Permission Doctor & App Inventory
+    private val _permissionDoctorReport = MutableStateFlow("All systems verified")
+    val permissionDoctorReport: StateFlow<String> = _permissionDoctorReport.asStateFlow()
+
+    private val _appInventorySize = MutableStateFlow("0 apps")
+    val appInventorySize: StateFlow<String> = _appInventorySize.asStateFlow()
+
+    private val _thoughtHistory = MutableStateFlow<List<String>>(emptyList())
+    val thoughtHistory: StateFlow<List<String>> = _thoughtHistory.asStateFlow()
+
     private val _logHistory = MutableStateFlow<List<DiagnosticLogEntry>>(emptyList())
     val logHistory: StateFlow<List<DiagnosticLogEntry>> = _logHistory.asStateFlow()
 
@@ -83,73 +123,60 @@ class LiveDiagnostics {
         _lastFramePreview.value = "None"
         _firstFrameReceivedContent.value = ""
         _lastServerMessageTypes.value = emptyList()
+        _recentInterruptionsCount.value = 0
     }
 
-    fun updateConnectionState(state: String) {
-        _connectionState.value = state
-    }
-
-    fun setModel(model: String) {
-        _currentModel.value = model
-    }
-
-    fun setAuthKey(key: String) {
-        _authKeyType.value = GeminiLiveHandshake.getKeyTypeDescription(key)
-    }
-
+    fun updateConnectionState(state: String) { _connectionState.value = state }
+    fun setModel(model: String) { _currentModel.value = model }
+    fun setVoice(voice: String) { _currentVoice.value = voice }
+    fun setLanguage(lang: String) { _currentLanguage.value = lang }
+    fun setAuthKey(key: String) { _authKeyType.value = GeminiLiveHandshake.getKeyTypeDescription(key) }
     fun setSocketOpened(httpCode: Int) {
         _socketOpenedTimestamp.value = System.currentTimeMillis()
         _httpUpgradeResponseCode.value = httpCode
     }
+    fun setLastClose(code: Int, reason: String) { _lastCloseCodeAndReason.value = "Code $code: $reason" }
+    fun setSetupComplete(arrived: Boolean) { _setupCompleteArrived.value = arrived }
+    fun setMicPermission(status: String) { _micPermissionStatus.value = status }
+    fun setAudioRecordState(state: String) { _audioRecordState.value = state }
+    fun setAudioTrackState(state: String) { _audioTrackState.value = state }
+    fun recordAudioSent(bytes: Long) { _bytesAudioSent.value += bytes }
+    fun recordAudioReceived(bytes: Long) { _bytesAudioReceived.value += bytes }
 
-    fun setLastClose(code: Int, reason: String) {
-        _lastCloseCodeAndReason.value = "Code $code: $reason"
+    fun setWakeWordState(state: String) { _wakeWordState.value = state }
+    fun setModelDownloadState(state: String) { _modelDownloadState.value = state }
+    fun setNoiseFloor(floor: Double) { _noiseFloor.value = "%.1f RMS".format(floor) }
+    fun setGateStatus(isOpen: Boolean, gatedFrames: Long) {
+        _noiseGateStatus.value = if (isOpen) "OPEN" else "CLOSED ($gatedFrames gated)"
+    }
+    fun incrementInterruptionCount() { _recentInterruptionsCount.value += 1 }
+    fun setCaptionTurnInfo(turnId: Long, isAuraSpeaking: Boolean) {
+        _captionTurnInfo.value = "Turn $turnId ${if (isAuraSpeaking) "(Aura Speaking)" else "(Idle)"}"
+    }
+    fun setOverlayState(info: String) { _overlayStateInfo.value = info }
+    fun setPermissionReport(report: String) { _permissionDoctorReport.value = report }
+    fun setAppInventorySize(userCount: Int, systemCount: Int) {
+        _appInventorySize.value = "${userCount + systemCount} apps ($userCount user, $systemCount system)"
     }
 
-    fun setSetupComplete(arrived: Boolean) {
-        _setupCompleteArrived.value = arrived
+    fun recordThought(thought: String) {
+        val clean = thought.trim()
+        if (clean.isBlank()) return
+        val time = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
+        val list = _thoughtHistory.value.toMutableList()
+        list.add(0, "[$time] ${clean.take(200)}")
+        if (list.size > 20) list.removeLast()
+        _thoughtHistory.value = list
+        log("AuraThought", clean.take(120))
     }
-
-    fun setMicPermission(status: String) {
-        _micPermissionStatus.value = status
-    }
-
-    fun setAudioRecordState(state: String) {
-        _audioRecordState.value = state
-    }
-
-    fun setAudioTrackState(state: String) {
-        _audioTrackState.value = state
-    }
-
-    fun addAudioSentBytes(bytes: Long) {
-        _bytesAudioSent.value += bytes
-    }
-
-    fun recordAudioSent(bytes: Long) = addAudioSentBytes(bytes)
-
-    fun addAudioReceivedBytes(bytes: Long) {
-        _bytesAudioReceived.value += bytes
-    }
-
-    fun recordAudioReceived(bytes: Long) = addAudioReceivedBytes(bytes)
 
     fun recordIncomingFrame(isBinary: Boolean, byteLength: Int, rawText: String) {
         _framesReceivedCount.value += 1
-        if (isBinary) {
-            _binaryFramesCount.value += 1
-        } else {
-            _textFramesCount.value += 1
-        }
-
+        if (isBinary) _binaryFramesCount.value += 1 else _textFramesCount.value += 1
         val preview = rawText.take(300)
         val frameTypeStr = if (isBinary) "BINARY" else "TEXT"
         _lastFramePreview.value = "[$frameTypeStr $byteLength B] $preview"
-
-        if (_firstFrameReceivedContent.value.isEmpty()) {
-            _firstFrameReceivedContent.value = preview
-        }
-
+        if (_firstFrameReceivedContent.value.isEmpty()) _firstFrameReceivedContent.value = preview
         Log.d("Aura", "Live Frame [$frameTypeStr] length=$byteLength: $preview")
         log("Aura", "Frame [$frameTypeStr] ${byteLength}B: ${preview.take(120)}")
     }
@@ -186,7 +213,18 @@ class LiveDiagnostics {
         sb.append("Timestamp: ${sdf.format(Date())}\n")
         sb.append("State: ${_connectionState.value}\n")
         sb.append("Model: ${_currentModel.value}\n")
+        sb.append("Voice: ${_currentVoice.value}\n")
+        sb.append("Language: ${_currentLanguage.value}\n")
         sb.append("Auth: ${_authKeyType.value}\n")
+        sb.append("Wake Word: ${_wakeWordState.value}\n")
+        sb.append("Model Download: ${_modelDownloadState.value}\n")
+        sb.append("Noise Floor: ${_noiseFloor.value}\n")
+        sb.append("Noise Gate: ${_noiseGateStatus.value}\n")
+        sb.append("Recent Interruptions: ${_recentInterruptionsCount.value}\n")
+        sb.append("Caption Info: ${_captionTurnInfo.value}\n")
+        sb.append("Overlay: ${_overlayStateInfo.value}\n")
+        sb.append("Permission Doctor: ${_permissionDoctorReport.value}\n")
+        sb.append("App Inventory: ${_appInventorySize.value}\n")
         sb.append("SetupComplete: ${_setupCompleteArrived.value}\n")
         sb.append("HTTP Upgrade Code: ${_httpUpgradeResponseCode.value}\n")
         sb.append("Socket Uptime: ${getUptimeFormatted()}\n")
@@ -194,10 +232,14 @@ class LiveDiagnostics {
         sb.append("Last Frame: ${_lastFramePreview.value}\n")
         sb.append("Last Close: ${_lastCloseCodeAndReason.value}\n")
         sb.append("Audio Sent: ${_bytesAudioSent.value} bytes\n")
-        sb.append("Audio Received: ${_bytesAudioReceived.value} bytes\n")
-        sb.append("Mic Permission: ${_micPermissionStatus.value}\n")
-        sb.append("AudioRecord State: ${_audioRecordState.value}\n")
-        sb.append("AudioTrack State: ${_audioTrackState.value}\n\n")
+        sb.append("Audio Received: ${_bytesAudioReceived.value} bytes\n\n")
+
+        if (_thoughtHistory.value.isNotEmpty()) {
+            sb.append("--- Recent Model Thoughts (Non-Speech) ---\n")
+            _thoughtHistory.value.forEach { sb.append("$it\n") }
+            sb.append("\n")
+        }
+
         sb.append("--- Last 50 Server Messages ---\n")
         _lastServerMessageTypes.value.forEach { sb.append("$it\n") }
         sb.append("\n--- Event Log ---\n")

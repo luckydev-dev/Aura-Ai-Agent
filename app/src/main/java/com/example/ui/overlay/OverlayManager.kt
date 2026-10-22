@@ -5,6 +5,7 @@ import android.content.Context
 import android.graphics.PixelFormat
 import android.os.Build
 import android.provider.Settings
+import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -22,19 +23,28 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.setViewTreeLifecycleOwner
-import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.example.service.AuraForegroundService
-import com.example.ui.components.AuraIcons
 import com.example.ui.components.AuraOrb
 import com.example.ui.components.OrbState
 import com.example.ui.theme.AuraTheme
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlin.math.abs
 
 class OverlayManager(private val context: Context) {
+
+    companion object {
+        private const val TAG = "Aura"
+    }
 
     private val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
     private var overlayView: View? = null
     private var isOverlayShowing = false
+
+    private val currentCaptionText = MutableStateFlow("")
+
+    fun updateCaption(text: String) {
+        currentCaptionText.value = text
+    }
 
     @SuppressLint("ClickableViewAccessibility")
     fun showOverlay() {
@@ -52,7 +62,7 @@ class OverlayManager(private val context: Context) {
             WindowManager.LayoutParams.WRAP_CONTENT,
             layoutType,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
@@ -68,7 +78,7 @@ class OverlayManager(private val context: Context) {
                     val micAmp = service?.audioStreamer?.micAmplitude?.collectAsState()?.value ?: 0f
                     val speakerAmp = service?.audioPlayer?.speakerAmplitude?.collectAsState()?.value ?: 0f
                     val isActing = service?.liveClient?.isAuraActing?.collectAsState()?.value ?: false
-                    val modelText = service?.liveClient?.modelTranscript?.collectAsState()?.value ?: ""
+                    val caption by currentCaptionText.collectAsState()
 
                     val state = when {
                         !isCallActive -> OrbState.IDLE
@@ -104,7 +114,7 @@ class OverlayManager(private val context: Context) {
                         }
 
                         // Compact caption pill while speaking or acting
-                        if (isCallActive && modelText.isNotBlank()) {
+                        if (isCallActive && caption.isNotBlank()) {
                             Spacer(modifier = Modifier.height(4.dp))
                             Box(
                                 modifier = Modifier
@@ -114,7 +124,7 @@ class OverlayManager(private val context: Context) {
                                     .padding(horizontal = 8.dp, vertical = 4.dp)
                             ) {
                                 androidx.compose.foundation.text.BasicText(
-                                    text = modelText,
+                                    text = caption,
                                     style = AuraTheme.typography.labelSmall.copy(color = Color.White),
                                     maxLines = 2
                                 )
@@ -145,12 +155,14 @@ class OverlayManager(private val context: Context) {
                     params.y = initialY + (event.rawY - initialTouchY).toInt()
                     try {
                         windowManager.updateViewLayout(composeView, params)
-                    } catch (_: Exception) {}
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error updating overlay layout: ${e.message}", e)
+                    }
                     true
                 }
                 MotionEvent.ACTION_UP -> {
-                    val diffX = Math.abs(event.rawX - initialTouchX)
-                    val diffY = Math.abs(event.rawY - initialTouchY)
+                    val diffX = abs(event.rawX - initialTouchX)
+                    val diffY = abs(event.rawY - initialTouchY)
                     if (diffX < 10 && diffY < 10) {
                         view.performClick()
                     }
@@ -164,15 +176,21 @@ class OverlayManager(private val context: Context) {
             windowManager.addView(composeView, params)
             overlayView = composeView
             isOverlayShowing = true
-        } catch (_: Exception) {}
+            Log.i(TAG, "Mini-orb overlay shown")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to show mini-orb overlay: ${e.message}", e)
+        }
     }
 
     fun hideOverlay() {
         if (!isOverlayShowing || overlayView == null) return
         try {
             windowManager.removeView(overlayView)
-        } catch (_: Exception) {}
+        } catch (e: Exception) {
+            Log.e(TAG, "Error removing mini-orb overlay: ${e.message}", e)
+        }
         overlayView = null
         isOverlayShowing = false
+        Log.i(TAG, "Mini-orb overlay hidden")
     }
 }

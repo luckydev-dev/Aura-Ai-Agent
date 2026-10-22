@@ -86,7 +86,8 @@ class MemoryRepository(context: Context) {
                 sb.append("- [${fact.category}] ${fact.key}: ${fact.value}\n")
             }
             sb.toString()
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            android.util.Log.e("Aura", "Failed to build memory context summary", e)
             ""
         }
     }

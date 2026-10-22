@@ -84,8 +84,8 @@ class CommTools(
 
             try {
                 context.startActivity(intent)
-            } catch (_: Exception) {
-                // Fallback launch via am start
+            } catch (e: Exception) {
+                android.util.Log.w("Aura", "startActivity for WhatsApp failed, trying root am start fallback: ${e.message}")
                 rootManager.execute("am start -a android.intent.action.VIEW -d \"$uri\" $pkg")
             }
 

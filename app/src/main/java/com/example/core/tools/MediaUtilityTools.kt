@@ -94,7 +94,8 @@ class MediaUtilityTools(
             return try {
                 context.startActivity(intent)
                 ToolExecutionResult(true, "Alarm set for %02d:%02d ($label)".format(hour, minute))
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                android.util.Log.w("Aura", "startActivity for set_alarm failed, using root fallback: ${e.message}")
                 val res = rootManager.execute("am start -a android.intent.action.SET_ALARM --ei android.intent.extra.alarm.HOUR $hour --ei android.intent.extra.alarm.MINUTES $minute --es android.intent.extra.alarm.MESSAGE \"$label\" --ez android.intent.extra.alarm.SKIP_UI true")
                 ToolExecutionResult(res.success, "Alarm set for %02d:%02d".format(hour, minute))
             }
@@ -122,7 +123,8 @@ class MediaUtilityTools(
             return try {
                 context.startActivity(intent)
                 ToolExecutionResult(true, "Timer started for $seconds seconds")
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                android.util.Log.w("Aura", "startActivity for set_timer failed, using root fallback: ${e.message}")
                 val res = rootManager.execute("am start -a android.intent.action.SET_TIMER --ei android.intent.extra.alarm.LENGTH $seconds --ez android.intent.extra.alarm.SKIP_UI true")
                 ToolExecutionResult(res.success, "Timer started for $seconds seconds")
             }
@@ -229,7 +231,8 @@ class MediaUtilityTools(
             return try {
                 context.startActivity(intent)
                 ToolExecutionResult(true, "Searched Google for: $query")
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                android.util.Log.w("Aura", "startActivity for search_web failed, using root fallback: ${e.message}")
                 val res = rootManager.execute("am start -a android.intent.action.VIEW -d \"$url\"")
                 ToolExecutionResult(res.success, "Searched for $query")
             }
@@ -343,7 +346,8 @@ class MediaUtilityTools(
             return try {
                 File(path).writeText(content)
                 ToolExecutionResult(true, "Wrote file to $path")
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                android.util.Log.w("Aura", "Standard File.writeText failed for $path, trying root: ${e.message}")
                 val res = rootManager.execute("echo \"$content\" > \"$path\"")
                 ToolExecutionResult(res.success, if (res.success) "Wrote file via root" else res.stderr)
             }

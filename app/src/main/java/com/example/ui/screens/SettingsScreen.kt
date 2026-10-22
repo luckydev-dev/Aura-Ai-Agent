@@ -3,6 +3,9 @@ package com.example.ui.screens
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
 import androidx.compose.foundation.background
@@ -21,9 +24,16 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.example.AuraApplication
+import com.example.core.audio.VoskModelManager
+import com.example.core.audio.VoskModelStatus
 import com.example.core.live.GeminiLiveHandshake
 import com.example.core.live.LiveDiagnostics
+import com.example.core.live.VoiceCatalog
+import com.example.core.root.PermissionCheckItem
+import com.example.core.root.PermissionDoctor
+import com.example.core.root.RootManager
 import com.example.core.settings.AuraPreferences
+import com.example.service.AuraForegroundService
 import com.example.ui.components.*
 import com.example.ui.theme.AuraTheme
 import kotlinx.coroutines.CompletableDeferred
@@ -52,38 +62,70 @@ fun SettingsScreen(
 
     val preferences = remember { AuraPreferences(context) }
     val diagnostics = remember { AuraApplication.instance.liveDiagnostics }
+    val rootManager = remember { RootManager(context) }
+    val permissionDoctor = remember { PermissionDoctor(context, rootManager) }
+    val voskModelManager = remember { VoskModelManager(context) }
 
+    // Collected Preferences
     val apiKey by preferences.apiKey.collectAsState(initial = "")
     val modelName by preferences.modelName.collectAsState(initial = AuraPreferences.DEFAULT_MODEL)
     val voiceName by preferences.voiceName.collectAsState(initial = AuraPreferences.DEFAULT_VOICE)
     val thinkingLevel by preferences.thinkingLevel.collectAsState(initial = AuraPreferences.DEFAULT_THINKING_LEVEL)
     val cachedLiveModels by preferences.cachedLiveModels.collectAsState(initial = emptySet())
-    val wakeEnabled by preferences.wakePhraseEnabled.collectAsState(initial = false)
-    val confirmRisky by preferences.confirmRiskyActions.collectAsState(initial = true)
-    val overlayEnabled by preferences.overlayEnabled.collectAsState(initial = false)
-    val isWaBusiness by preferences.isWhatsappBusiness.collectAsState(initial = false)
-    val systemInstruction by preferences.systemInstruction.collectAsState(initial = AuraPreferences.DEFAULT_SYSTEM_INSTRUCTION)
 
+    val defaultLanguage by preferences.defaultLanguage.collectAsState(initial = AuraPreferences.DEFAULT_LANGUAGE)
+    val greetOnConnect by preferences.greetOnConnect.collectAsState(initial = true)
+    val showCaptions by preferences.showCaptions.collectAsState(initial = true)
+
+    val allowInterrupting by preferences.allowInterrupting.collectAsState(initial = true)
+    val interruptionSens by preferences.interruptionSensitivity.collectAsState(initial = "Low")
+    val noiseGateStrength by preferences.noiseGateStrength.collectAsState(initial = "Medium")
+    val autoHangupSec by preferences.autoHangupSeconds.collectAsState(initial = 30)
+
+    val wakeEnabled by preferences.wakePhraseEnabled.collectAsState(initial = false)
+    val wakeSensitivity by preferences.wakeWordSensitivity.collectAsState(initial = "normal")
+    val voskStatus by voskModelManager.status.collectAsState()
+
+    val edgeLightingEnabled by preferences.edgeLightingEnabled.collectAsState(initial = true)
+    val edgeLightingThickness by preferences.edgeLightingThickness.collectAsState(initial = 8)
+    val edgeLightingIntensity by preferences.edgeLightingIntensity.collectAsState(initial = 1.0f)
+    val overlayEnabled by preferences.overlayEnabled.collectAsState(initial = false)
+
+    val ownerName by preferences.ownerName.collectAsState(initial = AuraPreferences.DEFAULT_OWNER_NAME)
+    val extraInstructions by preferences.extraInstructions.collectAsState(initial = "")
+    val includeSystemApps by preferences.includeSystemApps.collectAsState(initial = true)
+
+    val confirmRisky by preferences.confirmRiskyActions.collectAsState(initial = true)
+    val isWaBusiness by preferences.isWhatsappBusiness.collectAsState(initial = false)
+
+    // Local mutable state for text inputs
     var inputApiKey by remember(apiKey) { mutableStateOf(apiKey) }
     var inputModel by remember(modelName) { mutableStateOf(modelName) }
     var inputThinkingLevel by remember(thinkingLevel) { mutableStateOf(thinkingLevel) }
-    var inputInstruction by remember(systemInstruction) { mutableStateOf(systemInstruction) }
+    var inputOwnerName by remember(ownerName) { mutableStateOf(ownerName) }
+    var inputExtraInstructions by remember(extraInstructions) { mutableStateOf(extraInstructions) }
 
+    // Voice catalog expansion state
+    var showAllVoices by remember { mutableStateOf(false) }
+
+    // Test connection state
     var isTestingConnection by remember { mutableStateOf(false) }
     var testConnectionStatus by remember { mutableStateOf<String?>(null) }
     var showDiagnosticsModal by remember { mutableStateOf(false) }
 
+    // Model fetching state
     var isFetchingModels by remember { mutableStateOf(false) }
     var fetchModelsMessage by remember { mutableStateOf<String?>(null) }
     var fetchModelsSuccess by remember { mutableStateOf(true) }
 
-    // Display models: either fetched live list or baseline defaults
-    val displayedModels = remember(cachedLiveModels) {
-        if (cachedLiveModels.isNotEmpty()) {
-            cachedLiveModels.toList()
-        } else {
-            AuraPreferences.INITIAL_LIVE_MODELS
-        }
+    // Permission Doctor state
+    var permissionItems by remember { mutableStateOf<List<PermissionCheckItem>>(emptyList()) }
+    var isRunningDoctor by remember { mutableStateOf(false) }
+    var doctorReportText by remember { mutableStateOf<String?>(null) }
+
+    // Refresh permissions on initial compose
+    LaunchedEffect(Unit) {
+        permissionItems = permissionDoctor.getAllCheckItems()
     }
 
     // Keep diagnostics aware of currently configured key
@@ -91,6 +133,10 @@ fun SettingsScreen(
         if (inputApiKey.isNotBlank()) {
             diagnostics.setAuthKey(inputApiKey)
         }
+    }
+
+    val displayedModels = remember(cachedLiveModels) {
+        if (cachedLiveModels.isNotEmpty()) cachedLiveModels.toList() else AuraPreferences.INITIAL_LIVE_MODELS
     }
 
     Box(
@@ -116,7 +162,7 @@ fun SettingsScreen(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                // API Key Section
+                // 1. API Key Card
                 item {
                     AuraCard(modifier = Modifier.fillMaxWidth()) {
                         androidx.compose.foundation.text.BasicText(
@@ -183,32 +229,347 @@ fun SettingsScreen(
                     }
                 }
 
-                // Voice Selection Section
+                // 2. Language & Speech Settings
                 item {
                     AuraCard(modifier = Modifier.fillMaxWidth()) {
                         androidx.compose.foundation.text.BasicText(
-                            text = "Agent Voice",
+                            text = "Language & Speech",
                             style = typography.titleMedium.copy(color = colors.textPrimary)
                         )
-                        Spacer(modifier = Modifier.height(6.dp))
+                        Spacer(modifier = Modifier.height(4.dp))
                         androidx.compose.foundation.text.BasicText(
-                            text = "Select Aura's speech synthesis voice for Gemini Live.",
+                            text = "Default language: Hinglish (natural Hindi + English mix with Indian context).",
                             style = typography.bodySmall.copy(color = colors.textSecondary)
                         )
                         Spacer(modifier = Modifier.height(10.dp))
+
                         LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            items(listOf("Aoede", "Charon", "Fenrir", "Kore", "Puck")) { voice ->
+                            items(AuraPreferences.LANGUAGE_OPTIONS) { lang ->
                                 AuraChip(
-                                    text = voice,
-                                    selected = voiceName == voice,
-                                    onClick = { scope.launch { preferences.setVoiceName(voice) } }
+                                    text = lang,
+                                    selected = defaultLanguage == lang,
+                                    onClick = {
+                                        scope.launch {
+                                            preferences.setDefaultLanguage(lang)
+                                            diagnostics.setLanguage(lang)
+                                        }
+                                    }
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(14.dp))
+                        AuraToggleRow(
+                            title = "Greet on Connect",
+                            subtitle = "Aura speaks a brief friendly greeting upon opening the voice session.",
+                            checked = greetOnConnect,
+                            onCheckedChange = { scope.launch { preferences.setGreetOnConnect(it) } },
+                            testTag = "toggle_greet_on_connect"
+                        )
+
+                        Spacer(modifier = Modifier.height(14.dp))
+                        AuraToggleRow(
+                            title = "Live Speech Captions",
+                            subtitle = "Display live dual-line subtitles for you and Aura during the call.",
+                            checked = showCaptions,
+                            onCheckedChange = { scope.launch { preferences.setShowCaptions(it) } },
+                            testTag = "toggle_show_captions"
+                        )
+                    }
+                }
+
+                // 3. Audio & Interruption Protection
+                item {
+                    AuraCard(modifier = Modifier.fillMaxWidth()) {
+                        androidx.compose.foundation.text.BasicText(
+                            text = "Anti-Interruption & Audio Processing",
+                            style = typography.titleMedium.copy(color = colors.textPrimary)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        androidx.compose.foundation.text.BasicText(
+                            text = "Adaptive noise gate (120Hz filter) prevents accidental cuts from breathing or background noise.",
+                            style = typography.bodySmall.copy(color = colors.textSecondary)
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        AuraToggleRow(
+                            title = "Allow Interrupting Aura",
+                            subtitle = "Allows your voice to cut off Aura while she is talking.",
+                            checked = allowInterrupting,
+                            onCheckedChange = { scope.launch { preferences.setAllowInterrupting(it) } },
+                            testTag = "toggle_allow_interrupting"
+                        )
+
+                        Spacer(modifier = Modifier.height(12.dp))
+                        androidx.compose.foundation.text.BasicText(
+                            text = "Interruption Sensitivity",
+                            style = typography.labelLarge.copy(color = colors.textPrimary)
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            items(AuraPreferences.INTERRUPTION_SENSITIVITY_OPTIONS) { opt ->
+                                AuraChip(
+                                    text = opt,
+                                    selected = interruptionSens == opt,
+                                    onClick = { scope.launch { preferences.setInterruptionSensitivity(opt) } }
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(12.dp))
+                        androidx.compose.foundation.text.BasicText(
+                            text = "Noise Gate Strength",
+                            style = typography.labelLarge.copy(color = colors.textPrimary)
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            items(AuraPreferences.NOISE_GATE_OPTIONS) { gateOpt ->
+                                AuraChip(
+                                    text = gateOpt,
+                                    selected = noiseGateStrength == gateOpt,
+                                    onClick = { scope.launch { preferences.setNoiseGateStrength(gateOpt) } }
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(12.dp))
+                        androidx.compose.foundation.text.BasicText(
+                            text = "Auto-Hangup on Silence",
+                            style = typography.labelLarge.copy(color = colors.textPrimary)
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            val hangupOptions = listOf(15 to "15s", 30 to "30s (Default)", 60 to "60s", 0 to "Disabled")
+                            items(hangupOptions) { (sec, label) ->
+                                AuraChip(
+                                    text = label,
+                                    selected = autoHangupSec == sec,
+                                    onClick = { scope.launch { preferences.setAutoHangupSeconds(sec) } }
                                 )
                             }
                         }
                     }
                 }
 
-                // Model Selection Section (Dynamically fetched from server)
+                // 4. Real Vosk "Hey Aura" Wake Word Card
+                item {
+                    AuraCard(modifier = Modifier.fillMaxWidth()) {
+                        androidx.compose.foundation.text.BasicText(
+                            text = "Offline Wake Word (\"Hey Aura\")",
+                            style = typography.titleMedium.copy(color = colors.textPrimary)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        androidx.compose.foundation.text.BasicText(
+                            text = "Powered by local Vosk Indian-English acoustic model (36 MB). Zero cloud audio transmission until activated.",
+                            style = typography.bodySmall.copy(color = colors.textSecondary)
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        AuraToggleRow(
+                            title = "Listen for \"Hey Aura\"",
+                            subtitle = "Continuously listens for wake trigger in background service.",
+                            checked = wakeEnabled,
+                            onCheckedChange = { scope.launch { preferences.setWakePhraseEnabled(it) } },
+                            testTag = "toggle_wake_phrase"
+                        )
+
+                        Spacer(modifier = Modifier.height(12.dp))
+                        androidx.compose.foundation.text.BasicText(
+                            text = "Wake Word Sensitivity",
+                            style = typography.labelLarge.copy(color = colors.textPrimary)
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            items(AuraPreferences.WAKE_SENSITIVITY_OPTIONS) { s ->
+                                AuraChip(
+                                    text = s.replaceFirstChar { it.uppercase() },
+                                    selected = wakeSensitivity == s,
+                                    onClick = { scope.launch { preferences.setWakeWordSensitivity(s) } }
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(12.dp))
+                        // Vosk Model Download / Readiness status
+                        when (val status = voskStatus) {
+                            is VoskModelStatus.Ready -> {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    AuraBadge(text = "✓ Vosk Model Ready (Offline)", isSuccess = true)
+                                    AuraButton(
+                                        text = "Test Wake Detection",
+                                        onClick = {
+                                            Toast.makeText(
+                                                context,
+                                                "Say 'Hey Aura' or 'Aura' clearly to test.",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                        },
+                                        isPrimary = false
+                                    )
+                                }
+                            }
+                            is VoskModelStatus.Downloading -> {
+                                Column(modifier = Modifier.fillMaxWidth()) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        androidx.compose.foundation.text.BasicText(
+                                            text = "Downloading Model (${status.progressPercent}%)...",
+                                            style = typography.labelSmall.copy(color = colors.accentStart)
+                                        )
+                                        androidx.compose.foundation.text.BasicText(
+                                            text = "${status.bytesDownloaded / 1024 / 1024}MB / ${status.totalBytes / 1024 / 1024}MB",
+                                            style = typography.labelSmall.copy(color = colors.textSecondary)
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(6.dp)
+                                            .clip(RoundedCornerShape(3.dp))
+                                            .background(colors.surfaceRaised)
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxWidth(status.progressPercent / 100f)
+                                                .fillMaxHeight()
+                                                .background(colors.accentMiddle)
+                                        )
+                                    }
+                                }
+                            }
+                            is VoskModelStatus.NotDownloaded, is VoskModelStatus.Error -> {
+                                if (status is VoskModelStatus.Error) {
+                                    androidx.compose.foundation.text.BasicText(
+                                        text = "Error: ${status.message}",
+                                        style = typography.labelSmall.copy(color = colors.danger)
+                                    )
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                }
+                                AuraButton(
+                                    text = "Download Wake Model (~36 MB)",
+                                    onClick = {
+                                        scope.launch {
+                                            val res = voskModelManager.downloadAndExtractModel()
+                                            if (res.isSuccess) {
+                                                Toast.makeText(context, "Vosk model downloaded successfully", Toast.LENGTH_SHORT).show()
+                                            } else {
+                                                Toast.makeText(context, "Download failed: ${res.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
+                                            }
+                                        }
+                                    },
+                                    isPrimary = true,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // 5. Edge Lighting & Overlay Controls
+                item {
+                    AuraCard(modifier = Modifier.fillMaxWidth()) {
+                        androidx.compose.foundation.text.BasicText(
+                            text = "Edge Lighting & Floating Overlays",
+                            style = typography.titleMedium.copy(color = colors.textPrimary)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        androidx.compose.foundation.text.BasicText(
+                            text = "Pulsing screen perimeter glow indicates Aura's state (listening, thinking, speaking) over any app.",
+                            style = typography.bodySmall.copy(color = colors.textSecondary)
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        AuraToggleRow(
+                            title = "Edge Lighting Overlay",
+                            subtitle = "Full-screen border glow with caption pill.",
+                            checked = edgeLightingEnabled,
+                            onCheckedChange = { scope.launch { preferences.setEdgeLightingEnabled(it) } },
+                            testTag = "toggle_edge_lighting"
+                        )
+
+                        Spacer(modifier = Modifier.height(12.dp))
+                        androidx.compose.foundation.text.BasicText(
+                            text = "Border Thickness",
+                            style = typography.labelLarge.copy(color = colors.textPrimary)
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            val thicknesses = listOf(4 to "4dp", 8 to "8dp (Default)", 12 to "12dp", 16 to "16dp")
+                            items(thicknesses) { (dpVal, lbl) ->
+                                AuraChip(
+                                    text = lbl,
+                                    selected = edgeLightingThickness == dpVal,
+                                    onClick = { scope.launch { preferences.setEdgeLightingThickness(dpVal) } }
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(12.dp))
+                        AuraToggleRow(
+                            title = "Floating Mini-Orb Overlay",
+                            subtitle = "Draggable floating orb outside the app for quick control.",
+                            checked = overlayEnabled,
+                            onCheckedChange = { scope.launch { preferences.setOverlayEnabled(it) } },
+                            testTag = "toggle_mini_orb"
+                        )
+                    }
+                }
+
+                // 6. Agent Voice Selection (All 30 Voices Catalog)
+                item {
+                    val activeVoiceInfo = VoiceCatalog.findVoice(voiceName) ?: VoiceCatalog.VOICES.first()
+                    AuraCard(modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                androidx.compose.foundation.text.BasicText(
+                                    text = "Agent Voice (${VoiceCatalog.VOICES.size} Available)",
+                                    style = typography.titleMedium.copy(color = colors.textPrimary)
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                androidx.compose.foundation.text.BasicText(
+                                    text = "Selected: ${activeVoiceInfo.name} (${activeVoiceInfo.gender}) - ${activeVoiceInfo.styleNote}",
+                                    style = typography.bodySmall.copy(color = colors.accentStart)
+                                )
+                            }
+                            AuraButton(
+                                text = if (showAllVoices) "Collapse" else "Show All",
+                                onClick = { showAllVoices = !showAllVoices },
+                                isPrimary = false
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        val displayList = if (showAllVoices) VoiceCatalog.VOICES else VoiceCatalog.VOICES.take(8)
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            items(displayList) { v ->
+                                AuraChip(
+                                    text = "${v.name} (${v.gender.first()})",
+                                    selected = voiceName.equals(v.name, ignoreCase = true),
+                                    onClick = {
+                                        scope.launch {
+                                            preferences.setVoiceName(v.name)
+                                            diagnostics.setVoice(v.name)
+                                        }
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // 7. Gemini Live Model Selection
                 item {
                     AuraCard(modifier = Modifier.fillMaxWidth()) {
                         Row(
@@ -255,12 +616,11 @@ fun SettingsScreen(
 
                         Spacer(modifier = Modifier.height(8.dp))
                         androidx.compose.foundation.text.BasicText(
-                            text = "Select an active model supporting bidirectional streaming (bidiGenerateContent):",
+                            text = "Select active model supporting bidirectional streaming (bidiGenerateContent):",
                             style = typography.bodySmall.copy(color = colors.textSecondary)
                         )
                         Spacer(modifier = Modifier.height(10.dp))
 
-                        // Model Chips
                         LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             items(displayedModels) { model ->
                                 AuraChip(
@@ -285,7 +645,6 @@ fun SettingsScreen(
                             testTag = "model_field"
                         )
 
-                        // Warning if saved/entered model is not in available models list
                         if (displayedModels.isNotEmpty() && !displayedModels.contains(inputModel)) {
                             Spacer(modifier = Modifier.height(8.dp))
                             androidx.compose.foundation.text.BasicText(
@@ -294,7 +653,6 @@ fun SettingsScreen(
                             )
                         }
 
-                        // Thinking Level options if model is extended thinking
                         if (inputModel.equals("gemini-3.8-live-extended-thinking", ignoreCase = true)) {
                             Spacer(modifier = Modifier.height(14.dp))
                             androidx.compose.foundation.text.BasicText(
@@ -302,11 +660,6 @@ fun SettingsScreen(
                                 style = typography.labelLarge.copy(color = colors.accentStart)
                             )
                             Spacer(modifier = Modifier.height(4.dp))
-                            androidx.compose.foundation.text.BasicText(
-                                text = "Higher levels provide more thorough reasoning before tool calls.",
-                                style = typography.bodySmall.copy(color = colors.textSecondary)
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
                             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 items(AuraPreferences.THINKING_LEVEL_OPTIONS) { level ->
                                     AuraChip(
@@ -323,7 +676,74 @@ fun SettingsScreen(
                     }
                 }
 
-                // Diagnostics Panel Launcher
+                // 8. Persona & Owner Customization
+                item {
+                    AuraCard(modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            androidx.compose.foundation.text.BasicText(
+                                text = "Owner & Persona Customization",
+                                style = typography.titleMedium.copy(color = colors.textPrimary)
+                            )
+                            AuraButton(
+                                text = "Reset Extra",
+                                onClick = {
+                                    scope.launch {
+                                        preferences.resetExtraInstructions()
+                                        inputExtraInstructions = ""
+                                    }
+                                },
+                                isPrimary = false
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        androidx.compose.foundation.text.BasicText(
+                            text = "Owner Name / Nickname",
+                            style = typography.labelLarge.copy(color = colors.textSecondary)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        AuraTextField(
+                            value = inputOwnerName,
+                            onValueChange = {
+                                inputOwnerName = it
+                                scope.launch { preferences.setOwnerName(it) }
+                            },
+                            placeholder = AuraPreferences.DEFAULT_OWNER_NAME,
+                            testTag = "owner_name_field"
+                        )
+
+                        Spacer(modifier = Modifier.height(12.dp))
+                        androidx.compose.foundation.text.BasicText(
+                            text = "Custom / Extra Instructions",
+                            style = typography.labelLarge.copy(color = colors.textSecondary)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        AuraTextField(
+                            value = inputExtraInstructions,
+                            onValueChange = {
+                                inputExtraInstructions = it
+                                scope.launch { preferences.setExtraInstructions(it) }
+                            },
+                            singleLine = false,
+                            placeholder = "Optional preferences (e.g. 'Speak extra concisely', 'Always confirm before sending emails')...",
+                            testTag = "extra_instructions_field"
+                        )
+
+                        Spacer(modifier = Modifier.height(12.dp))
+                        AuraToggleRow(
+                            title = "Include System Apps in Inventory",
+                            subtitle = "Feeds full package inventory to Aura for direct opening without guessing.",
+                            checked = includeSystemApps,
+                            onCheckedChange = { scope.launch { preferences.setIncludeSystemApps(it) } }
+                        )
+                    }
+                }
+
+                // 9. Permission Doctor & Root Health Check Card
                 item {
                     AuraCard(modifier = Modifier.fillMaxWidth()) {
                         Row(
@@ -333,12 +753,127 @@ fun SettingsScreen(
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
                                 androidx.compose.foundation.text.BasicText(
-                                    text = "Live Diagnostics",
+                                    text = "Permission Doctor",
+                                    style = typography.titleMedium.copy(color = colors.textPrimary)
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                androidx.compose.foundation.text.BasicText(
+                                    text = "Diagnose and auto-grant permissions via Root/SU.",
+                                    style = typography.bodySmall.copy(color = colors.textSecondary)
+                                )
+                            }
+                            AuraButton(
+                                text = if (isRunningDoctor) "Fixing..." else "Auto-Fix All",
+                                onClick = {
+                                    scope.launch {
+                                        isRunningDoctor = true
+                                        val isRoot = rootManager.isRootAvailable()
+                                        if (isRoot) {
+                                            rootManager.autoGrantEverything()
+                                            permissionDoctor.runSilentHealthCheck()
+                                            permissionDoctor.applyOemFixes()
+                                            doctorReportText = "Auto-granted all system permissions via root."
+                                        } else {
+                                            doctorReportText = "Root not detected. Please grant permissions manually."
+                                        }
+                                        permissionItems = permissionDoctor.getAllCheckItems()
+                                        isRunningDoctor = false
+                                    }
+                                },
+                                isPrimary = false,
+                                enabled = !isRunningDoctor
+                            )
+                        }
+
+                        doctorReportText?.let { report ->
+                            Spacer(modifier = Modifier.height(6.dp))
+                            androidx.compose.foundation.text.BasicText(
+                                text = report,
+                                style = typography.labelSmall.copy(color = colors.accentStart)
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        // Check items list
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            permissionItems.forEach { item ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(colors.surfaceRaised)
+                                        .padding(10.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                                        androidx.compose.foundation.text.BasicText(
+                                            text = item.title,
+                                            style = typography.bodyMedium.copy(color = colors.textPrimary)
+                                        )
+                                        androidx.compose.foundation.text.BasicText(
+                                            text = item.description,
+                                            style = typography.labelSmall.copy(color = colors.textTertiary)
+                                        )
+                                    }
+                                    if (item.isGranted) {
+                                        AuraBadge(text = "✓ Granted", isSuccess = true)
+                                    } else {
+                                        AuraButton(
+                                            text = "Fix",
+                                            onClick = {
+                                                scope.launch {
+                                                    item.fixAction()
+                                                    permissionItems = permissionDoctor.getAllCheckItems()
+                                                }
+                                            },
+                                            isPrimary = false
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 10. General System Toggles
+                item {
+                    AuraCard(modifier = Modifier.fillMaxWidth()) {
+                        AuraToggleRow(
+                            title = "Confirm Risky Actions",
+                            subtitle = "Voice confirmation required before delete, reboot, or critical changes.",
+                            checked = confirmRisky,
+                            onCheckedChange = { scope.launch { preferences.setConfirmRiskyActions(it) } },
+                            testTag = "toggle_confirm_risky"
+                        )
+                        Spacer(modifier = Modifier.height(14.dp))
+                        AuraToggleRow(
+                            title = "Target WhatsApp Business",
+                            subtitle = "Automate messages through com.whatsapp.w4b rather than standard WhatsApp.",
+                            checked = isWaBusiness,
+                            onCheckedChange = { scope.launch { preferences.setWhatsappBusiness(it) } },
+                            testTag = "toggle_wa_business"
+                        )
+                    }
+                }
+
+                // 11. Live Diagnostics Panel Trigger
+                item {
+                    AuraCard(modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                androidx.compose.foundation.text.BasicText(
+                                    text = "Live Diagnostics & Telemetry",
                                     style = typography.titleMedium.copy(color = colors.textPrimary)
                                 )
                                 Spacer(modifier = Modifier.height(4.dp))
                                 androidx.compose.foundation.text.BasicText(
-                                    text = "Inspect WebSocket frames, text/binary counters, and server status.",
+                                    text = "Inspect WebSocket frames, noise floor, gate state, and recent events.",
                                     style = typography.bodySmall.copy(color = colors.textSecondary)
                                 )
                             }
@@ -353,76 +888,10 @@ fun SettingsScreen(
                     }
                 }
 
-                // Toggles
-                item {
-                    AuraCard(modifier = Modifier.fillMaxWidth()) {
-                        AuraToggleRow(
-                            title = "Confirm Risky Actions",
-                            subtitle = "Ask for voice confirmation before delete, reboot, or shutdown.",
-                            checked = confirmRisky,
-                            onCheckedChange = { scope.launch { preferences.setConfirmRiskyActions(it) } },
-                            testTag = "toggle_confirm_risky"
-                        )
-                        Spacer(modifier = Modifier.height(14.dp))
-                        AuraToggleRow(
-                            title = "Wake Phrase Detection",
-                            subtitle = "Listen for voice trigger in background service.",
-                            checked = wakeEnabled,
-                            onCheckedChange = { scope.launch { preferences.setWakePhraseEnabled(it) } },
-                            testTag = "toggle_wake_phrase"
-                        )
-                        Spacer(modifier = Modifier.height(14.dp))
-                        AuraToggleRow(
-                            title = "Target WhatsApp Business",
-                            subtitle = "Send messages via com.whatsapp.w4b instead of standard WhatsApp.",
-                            checked = isWaBusiness,
-                            onCheckedChange = { scope.launch { preferences.setWhatsappBusiness(it) } },
-                            testTag = "toggle_wa_business"
-                        )
-                    }
-                }
-
-                // Persona & System Prompt Editor
-                item {
-                    AuraCard(modifier = Modifier.fillMaxWidth()) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            androidx.compose.foundation.text.BasicText(
-                                text = "Agent Persona Prompt",
-                                style = typography.titleMedium.copy(color = colors.textPrimary),
-                                modifier = Modifier.weight(1f, fill = false)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            AuraButton(
-                                text = "Reset",
-                                onClick = {
-                                    inputInstruction = AuraPreferences.DEFAULT_SYSTEM_INSTRUCTION
-                                    scope.launch { preferences.setSystemInstruction(inputInstruction) }
-                                },
-                                isPrimary = false
-                            )
-                        }
-                        Spacer(modifier = Modifier.height(6.dp))
-                        AuraTextField(
-                            value = inputInstruction,
-                            onValueChange = {
-                                inputInstruction = it
-                                scope.launch { preferences.setSystemInstruction(it) }
-                            },
-                            singleLine = false,
-                            placeholder = "System persona instruction...",
-                            testTag = "persona_prompt_field"
-                        )
-                    }
-                }
-
-                // Setup Wizard Button
+                // 12. Setup Wizard Launcher
                 item {
                     AuraButton(
-                        text = "Re-run Setup Wizard & Root Checks",
+                        text = "Re-run Setup Wizard & Hardware Test",
                         onClick = onNavigateToSetup,
                         isPrimary = false,
                         modifier = Modifier.fillMaxWidth(),
@@ -433,7 +902,7 @@ fun SettingsScreen(
             }
         }
 
-        // Live Diagnostics Modal
+        // Live Diagnostics Full Modal
         if (showDiagnosticsModal) {
             val diagState by diagnostics.connectionState.collectAsState()
             val diagModel by diagnostics.currentModel.collectAsState()
@@ -447,9 +916,14 @@ fun SettingsScreen(
             val diagSent by diagnostics.bytesAudioSent.collectAsState()
             val diagRecv by diagnostics.bytesAudioReceived.collectAsState()
             val diagSetupOk by diagnostics.setupCompleteArrived.collectAsState()
-            val diagMic by diagnostics.micPermissionStatus.collectAsState()
-            val diagRecState by diagnostics.audioRecordState.collectAsState()
-            val diagTrackState by diagnostics.audioTrackState.collectAsState()
+            val diagNoiseFloor by diagnostics.noiseFloor.collectAsState()
+            val diagNoiseGate by diagnostics.noiseGateStatus.collectAsState()
+            val diagInterruptions by diagnostics.recentInterruptionsCount.collectAsState()
+            val diagCaptionTurn by diagnostics.captionTurnInfo.collectAsState()
+            val diagOverlayState by diagnostics.overlayStateInfo.collectAsState()
+            val diagWakeState by diagnostics.wakeWordState.collectAsState()
+            val diagAppInv by diagnostics.appInventorySize.collectAsState()
+            val diagThoughts by diagnostics.thoughtHistory.collectAsState()
             val diagLogs by diagnostics.lastServerMessageTypes.collectAsState()
             val diagUptime = diagnostics.getUptimeFormatted()
 
@@ -462,8 +936,8 @@ fun SettingsScreen(
             ) {
                 AuraCard(
                     modifier = Modifier
-                        .fillMaxWidth(0.94f)
-                        .fillMaxHeight(0.90f)
+                        .fillMaxWidth(0.95f)
+                        .fillMaxHeight(0.92f)
                         .clickable(enabled = false) {}
                 ) {
                     Row(
@@ -472,7 +946,7 @@ fun SettingsScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         androidx.compose.foundation.text.BasicText(
-                            text = "Live Diagnostics & Logs",
+                            text = "Live Diagnostics & Telemetry",
                             style = typography.titleMedium.copy(color = colors.textPrimary)
                         )
                         AuraButton(
@@ -486,7 +960,7 @@ fun SettingsScreen(
 
                     LazyColumn(
                         modifier = Modifier.weight(1f),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         item {
                             DiagnosticRow("Live State", diagState, colors.accentStart)
@@ -498,10 +972,14 @@ fun SettingsScreen(
                             DiagnosticRow("Frames Received", "$diagFramesCount (text $diagTextFrames / binary $diagBinaryFrames)", if (diagFramesCount > 0) colors.success else colors.textSecondary)
                             DiagnosticRow("Audio Bytes Sent", "$diagSent bytes", if (diagSent > 0) colors.success else colors.textPrimary)
                             DiagnosticRow("Audio Bytes Received", "$diagRecv bytes", if (diagRecv > 0) colors.success else colors.textPrimary)
+                            DiagnosticRow("Noise Floor", diagNoiseFloor, colors.textPrimary)
+                            DiagnosticRow("Noise Gate", diagNoiseGate, if (diagNoiseGate.startsWith("OPEN")) colors.success else colors.textSecondary)
+                            DiagnosticRow("Interruptions", "$diagInterruptions", if (diagInterruptions > 0) colors.warning else colors.textPrimary)
+                            DiagnosticRow("Caption State", diagCaptionTurn, colors.accentStart)
+                            DiagnosticRow("Overlay State", diagOverlayState, colors.textPrimary)
+                            DiagnosticRow("Wake Word Engine", diagWakeState, colors.textPrimary)
+                            DiagnosticRow("App Inventory", diagAppInv, colors.textPrimary)
                             DiagnosticRow("Last Close Code", diagLastClose, colors.textSecondary)
-                            DiagnosticRow("Mic Permission", diagMic, colors.textPrimary)
-                            DiagnosticRow("Audio Record", diagRecState, colors.textPrimary)
-                            DiagnosticRow("Audio Track", diagTrackState, colors.textPrimary)
                         }
 
                         // Last Frame Preview
@@ -523,6 +1001,23 @@ fun SettingsScreen(
                                 androidx.compose.foundation.text.BasicText(
                                     text = diagLastFrame.ifBlank { "No frame received yet." },
                                     style = typography.bodySmall.copy(color = colors.textSecondary)
+                                )
+                            }
+                        }
+
+                        // Recent Thoughts Section (Filtered from captions)
+                        if (diagThoughts.isNotEmpty()) {
+                            item {
+                                Spacer(modifier = Modifier.height(8.dp))
+                                androidx.compose.foundation.text.BasicText(
+                                    text = "Model Internal Thoughts (Filtered):",
+                                    style = typography.titleMedium.copy(color = colors.accentStart)
+                                )
+                            }
+                            items(diagThoughts.takeLast(5)) { thought ->
+                                androidx.compose.foundation.text.BasicText(
+                                    text = "🧠 $thought",
+                                    style = typography.labelSmall.copy(color = colors.textSecondary)
                                 )
                             }
                         }

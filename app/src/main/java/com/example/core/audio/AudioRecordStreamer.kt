@@ -14,6 +14,7 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.util.ArrayDeque
 import kotlin.math.sqrt
 
 enum class AudioRecordState {
@@ -28,7 +29,10 @@ class AudioRecordStreamer(
         const val SAMPLE_RATE = 16000
         const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
         const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
-        const val CHUNK_SIZE_BYTES = 1280 // 40ms of 16kHz 16-bit mono PCM
+        const val CHUNK_SIZE_BYTES = 1280 // 40ms of 16kHz 16-bit mono PCM (640 samples)
+        const val SAMPLES_PER_CHUNK = 640
+        const val PRE_ROLL_CHUNKS = 5 // 200ms pre-roll
+        const val HANGOVER_CHUNKS = 8 // 320ms hangover
     }
 
     private var audioRecord: AudioRecord? = null
@@ -47,6 +51,32 @@ class AudioRecordStreamer(
 
     private val _recordState = MutableStateFlow(AudioRecordState.IDLE)
     val recordState: StateFlow<AudioRecordState> = _recordState.asStateFlow()
+
+    // Noise gate diagnostics
+    private val _noiseFloor = MutableStateFlow(120.0)
+    val noiseFloor: StateFlow<Double> = _noiseFloor.asStateFlow()
+
+    private val _isGateOpen = MutableStateFlow(false)
+    val isGateOpen: StateFlow<Boolean> = _isGateOpen.asStateFlow()
+
+    private val _gatedFramesCount = MutableStateFlow(0L)
+    val gatedFramesCount: StateFlow<Long> = _gatedFramesCount.asStateFlow()
+
+    // Settings
+    var noiseGateStrength: String = "Medium" // Off, Low, Medium, High
+    var isAuraSpeaking: Boolean = false
+    var isHeadphonesMode: Boolean = false
+
+    // 1st-order High-Pass Filter state (~120Hz cutoff at 16kHz: alpha ≈ 0.955f)
+    private val hpAlpha = 0.955f
+    private var prevInputSample = 0f
+    private var prevOutputSample = 0f
+
+    // Pre-roll ring buffer
+    private val preRollBuffer = ArrayDeque<ByteArray>(PRE_ROLL_CHUNKS)
+
+    private val silenceChunk = ByteArray(CHUNK_SIZE_BYTES)
+    private val silenceChunkBase64 = Base64.encodeToString(silenceChunk, Base64.NO_WRAP)
 
     private val diagnostics = runCatching { AuraApplication.instance.liveDiagnostics }.getOrNull()
 
@@ -134,28 +164,125 @@ class AudioRecordStreamer(
             _recordState.value = AudioRecordState.RECORDING
             diagnostics?.setAudioRecordState("Recording (16kHz Mono)")
 
+            // Reset filter & gate state
+            prevInputSample = 0f
+            prevOutputSample = 0f
+            preRollBuffer.clear()
+            _isGateOpen.value = false
+            _gatedFramesCount.value = 0L
+
             recordingJob = scope.launch(Dispatchers.IO) {
-                val buffer = ByteArray(CHUNK_SIZE_BYTES)
+                val rawBuffer = ByteArray(CHUNK_SIZE_BYTES)
+                var consecutiveSpeechFrames = 0
+                var hangoverCounter = 0
+                var gateOpen = false
+
                 while (isActive && isRecording) {
-                    val read = activeRecord.read(buffer, 0, buffer.size)
+                    val read = activeRecord.read(rawBuffer, 0, rawBuffer.size)
                     if (read > 0) {
-                        // Calculate RMS amplitude for orb reaction
+                        // 1. High-Pass Filter (120 Hz)
+                        val filteredBuffer = ByteArray(read)
                         var sum = 0.0
                         var i = 0
                         while (i < read - 1) {
-                            val sample = (buffer[i].toInt() and 0xFF) or (buffer[i + 1].toInt() shl 8)
-                            sum += sample * sample
+                            val rawSample = (rawBuffer[i].toInt() and 0xFF) or (rawBuffer[i + 1].toInt() shl 8)
+                            val rawShort = rawSample.toShort().toFloat()
+
+                            // y[n] = alpha * (y[n-1] + x[n] - x[n-1])
+                            val filteredSample = (hpAlpha * (prevOutputSample + rawShort - prevInputSample)).coerceIn(-32768f, 32767f)
+                            prevInputSample = rawShort
+                            prevOutputSample = filteredSample
+
+                            val outShort = filteredSample.toInt().toShort()
+                            filteredBuffer[i] = (outShort.toInt() and 0xFF).toByte()
+                            filteredBuffer[i + 1] = ((outShort.toInt() shr 8) and 0xFF).toByte()
+
+                            sum += outShort * outShort
                             i += 2
                         }
-                        val rms = sqrt(sum / (read / 2.0))
-                        val normalized = (rms / 32768.0).toFloat().coerceIn(0f, 1f)
-                        _micAmplitude.value = normalized
 
-                        if (!_isMuted.value) {
-                            val base64Chunk = Base64.encodeToString(buffer, 0, read, Base64.NO_WRAP)
+                        // 2. Compute RMS
+                        val sampleCount = read / 2
+                        val rms = sqrt(sum / sampleCount)
+                        val normalizedAmp = (rms / 32768.0).toFloat().coerceIn(0f, 1f)
+                        _micAmplitude.value = if (_isMuted.value) 0f else normalizedAmp
+
+                        if (_isMuted.value) {
+                            // If muted, send digital silence
+                            onChunkEncoded(silenceChunkBase64)
+                            _isGateOpen.value = false
+                            continue
+                        }
+
+                        // 3. Adaptive Noise Floor Tracking (slow EMA during quiet)
+                        val currentNoiseFloor = _noiseFloor.value
+                        if (rms < currentNoiseFloor * 2.0 && rms > 20.0) {
+                            _noiseFloor.value = currentNoiseFloor * 0.98 + rms * 0.02
+                        }
+
+                        // 4. Threshold & Consecutive frames criteria
+                        val gateStrength = noiseGateStrength.lowercase()
+                        if (gateStrength == "off") {
+                            // Gate disabled: send all audio
+                            _isGateOpen.value = true
+                            val base64Chunk = Base64.encodeToString(filteredBuffer, 0, read, Base64.NO_WRAP)
+                            onChunkEncoded(base64Chunk)
+                            continue
+                        }
+
+                        val (multiplier, minRms, requiredFrames) = when {
+                            isAuraSpeaking && !isHeadphonesMode -> {
+                                // Loudspeaker playback: raise gate to avoid speaker feedback / breath interrupts
+                                Triple(6.0, 900.0, 6) // ~240ms sustained
+                            }
+                            gateStrength == "high" -> Triple(4.0, 500.0, 3)
+                            gateStrength == "low" -> Triple(2.2, 250.0, 2)
+                            else -> Triple(3.0, 350.0, 2) // "Medium" (Default)
+                        }
+
+                        val openThreshold = maxOf(currentNoiseFloor * multiplier, minRms)
+
+                        if (rms >= openThreshold) {
+                            consecutiveSpeechFrames++
+                            if (consecutiveSpeechFrames >= requiredFrames) {
+                                if (!gateOpen) {
+                                    gateOpen = true
+                                    _isGateOpen.value = true
+                                    // Flush pre-roll buffer so initial consonants are preserved!
+                                    while (preRollBuffer.isNotEmpty()) {
+                                        val preChunk = preRollBuffer.removeFirst()
+                                        val encoded = Base64.encodeToString(preChunk, Base64.NO_WRAP)
+                                        onChunkEncoded(encoded)
+                                    }
+                                }
+                                hangoverCounter = HANGOVER_CHUNKS
+                            }
+                        } else {
+                            consecutiveSpeechFrames = 0
+                            if (hangoverCounter > 0) {
+                                hangoverCounter--
+                            } else {
+                                if (gateOpen) {
+                                    gateOpen = false
+                                    _isGateOpen.value = false
+                                }
+                            }
+                        }
+
+                        // Update pre-roll buffer
+                        if (preRollBuffer.size >= PRE_ROLL_CHUNKS) {
+                            preRollBuffer.removeFirst()
+                        }
+                        preRollBuffer.addLast(filteredBuffer.copyOf())
+
+                        // 5. Send Audio or Digital Silence
+                        if (gateOpen) {
+                            val base64Chunk = Base64.encodeToString(filteredBuffer, 0, read, Base64.NO_WRAP)
                             onChunkEncoded(base64Chunk)
                         } else {
-                            _micAmplitude.value = 0f
+                            // Send DIGITAL SILENCE frame so server VAD has continuous stream
+                            _gatedFramesCount.value += 1
+                            onChunkEncoded(silenceChunkBase64)
                         }
                     }
                 }
@@ -198,7 +325,9 @@ class AudioRecordStreamer(
         noiseSuppressor = null
         gainControl = null
 
+        preRollBuffer.clear()
         _micAmplitude.value = 0f
+        _isGateOpen.value = false
         _recordState.value = AudioRecordState.IDLE
         diagnostics?.setAudioRecordState("Idle")
     }

@@ -42,6 +42,7 @@ robolectric = "4.16.1"
 credentials = "1.5.0"
 googleid = "1.1.1"
 securityCrypto = "1.1.0-alpha06"
+voskAndroid = "0.3.47"
 
 
 [libraries]
@@ -100,6 +101,7 @@ firebase-auth = { group = "com.google.firebase", name = "firebase-auth" }
 androidx-credentials = { group = "androidx.credentials", name = "credentials", version.ref = "credentials" }
 androidx-credentials-play-services = { group = "androidx.credentials", name = "credentials-play-services-auth", version.ref = "credentials" }
 googleid = { group = "com.google.android.libraries.identity.googleid", name = "googleid", version.ref = "googleid" }
+vosk-android = { group = "com.alphacephei", name = "vosk-android", version.ref = "voskAndroid" }
 
 
 [plugins]

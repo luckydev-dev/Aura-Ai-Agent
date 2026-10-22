@@ -2,68 +2,62 @@ package com.example.core.tools
 
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import com.example.core.root.RootManager
+import org.json.JSONArray
+import org.json.JSONObject
 import java.util.Locale
 
 class AppTools(
     private val context: Context,
-    private val rootManager: RootManager
+    private val rootManager: RootManager,
+    private val appInventory: AppInventory
 ) {
-
-    private fun findPackage(nameOrPackage: String): String? {
-        val pm = context.packageManager
-        val query = nameOrPackage.trim().lowercase(Locale.ROOT)
-        val installed = pm.getInstalledApplications(PackageManager.GET_META_DATA)
-
-        // Exact package name match
-        for (app in installed) {
-            if (app.packageName.lowercase(Locale.ROOT) == query) return app.packageName
-        }
-
-        // Fuzzy match on application label
-        for (app in installed) {
-            val label = pm.getApplicationLabel(app).toString().lowercase(Locale.ROOT)
-            if (label == query || label.contains(query)) {
-                return app.packageName
-            }
-        }
-        return null
-    }
 
     val openAppTool = object : Tool {
         override val name = "open_app"
-        override val description = "Opens an installed Android app by its name or package identifier."
+        override val description = "Opens an installed Android app using exact name, package, or alias (e.g. 'wa', 'yt', 'insta')."
         override val parametersSchema = mapOf(
             "type" to "object",
             "properties" to mapOf(
                 "name_or_package" to mapOf(
                     "type" to "string",
-                    "description" to "The name of the app (e.g. 'WhatsApp', 'Chrome') or its package name."
+                    "description" to "The name of the app (e.g. 'WhatsApp', 'Chrome', 'YouTube', 'insta') or its package name."
                 )
             ),
             "required" to listOf("name_or_package")
         )
 
         override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
-            val query = args["name_or_package"]?.toString() ?: return ToolExecutionResult(false, "Missing app name")
-            val pkg = findPackage(query)
-            if (pkg == null) {
-                return ToolExecutionResult(false, "Could not find app matching '$query'")
+            val query = args["name_or_package"]?.toString()?.trim() ?: return ToolExecutionResult(false, "Missing app name")
+
+            val match = appInventory.findApp(query)
+            val pkgToLaunch = when (match) {
+                is AppMatchResult.Found -> match.app.packageName
+                is AppMatchResult.Ambiguous -> {
+                    val candidateNames = match.candidates.take(5).joinToString(", ") { "${it.label} (${it.packageName})" }
+                    return ToolExecutionResult(false, "Multiple apps matched '$query': $candidateNames. Which one should I open?")
+                }
+                AppMatchResult.NotFound -> {
+                    return ToolExecutionResult(false, "App '$query' is not installed on this device.")
+                }
             }
 
-            // Launch via PackageManager intent or am start
-            val launchIntent = context.packageManager.getLaunchIntentForPackage(pkg)
+            // Launch via PackageManager launch intent
+            val pm = context.packageManager
+            val launchIntent = pm.getLaunchIntentForPackage(pkgToLaunch)
             return if (launchIntent != null) {
                 launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 context.startActivity(launchIntent)
-                ToolExecutionResult(true, "Opened $pkg successfully")
+                ToolExecutionResult(true, "Opened $pkgToLaunch successfully")
             } else {
-                val res = rootManager.execute("monkey -p $pkg -c android.intent.category.LAUNCHER 1")
+                // Root monkey fallback
+                val res = rootManager.execute("monkey -p $pkgToLaunch -c android.intent.category.LAUNCHER 1")
                 if (res.success) {
-                    ToolExecutionResult(true, "Started $pkg")
+                    ToolExecutionResult(true, "Started $pkgToLaunch via system launcher")
                 } else {
-                    ToolExecutionResult(false, "Failed to start $pkg: ${res.stderr}")
+                    ToolExecutionResult(false, "Failed to start $pkgToLaunch: ${res.stderr}")
                 }
             }
         }
@@ -82,12 +76,131 @@ class AppTools(
 
         override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
             val name = args["name"]?.toString() ?: return ToolExecutionResult(false, "Missing app name")
-            val pkg = findPackage(name) ?: name
+            val pkg = when (val m = appInventory.findApp(name)) {
+                is AppMatchResult.Found -> m.app.packageName
+                else -> name.trim()
+            }
             val res = rootManager.execute("am force-stop $pkg")
             return if (res.success) {
                 ToolExecutionResult(true, "Force stopped $pkg")
             } else {
                 ToolExecutionResult(false, "Failed to stop $pkg: ${res.stderr}")
+            }
+        }
+    }
+
+    val listInstalledAppsTool = object : Tool {
+        override val name = "list_installed_apps"
+        override val description = "Lists installed apps with full pagination, filtering, and system app options."
+        override val parametersSchema = mapOf(
+            "type" to "object",
+            "properties" to mapOf(
+                "filter" to mapOf("type" to "string", "description" to "Optional search filter."),
+                "include_system" to mapOf("type" to "boolean", "description" to "Whether to include system apps (default true)."),
+                "only_launchable" to mapOf("type" to "boolean", "description" to "Only apps that can be opened by user (default true)."),
+                "limit" to mapOf("type" to "integer", "description" to "Maximum items to return (default 50, max 200)."),
+                "offset" to mapOf("type" to "integer", "description" to "Pagination offset index (default 0).")
+            )
+        )
+
+        override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
+            val filter = args["filter"]?.toString()?.lowercase(Locale.ROOT) ?: ""
+            val includeSystem = (args["include_system"] as? Boolean) ?: true
+            val limit = (args["limit"] as? Number)?.toInt()?.coerceIn(1, 200) ?: 50
+            val offset = (args["offset"] as? Number)?.toInt()?.coerceAtLeast(0) ?: 0
+
+            var appList = appInventory.apps.value
+            if (!includeSystem) {
+                appList = appList.filter { !it.isSystem }
+            }
+            if (filter.isNotBlank()) {
+                appList = appList.filter {
+                    it.label.lowercase(Locale.ROOT).contains(filter) ||
+                            it.packageName.lowercase(Locale.ROOT).contains(filter)
+                }
+            }
+
+            val total = appList.size
+            val paged = appList.drop(offset).take(limit)
+
+            val lines = paged.map { "${it.label} (${it.packageName}) [${if (it.isSystem) "System" else "User"}]" }
+            val header = "Showing ${paged.size} of $total apps (offset $offset, limit $limit):\n"
+            return ToolExecutionResult(true, header + lines.joinToString("\n"))
+        }
+    }
+
+    val getAppInfoTool = object : Tool {
+        override val name = "get_app_info"
+        override val description = "Gets detailed package info: version, system flag, enabled state, and granted permissions."
+        override val parametersSchema = mapOf(
+            "type" to "object",
+            "properties" to mapOf(
+                "package_name" to mapOf("type" to "string", "description" to "Exact package name or app name.")
+            ),
+            "required" to listOf("package_name")
+        )
+
+        override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
+            val input = args["package_name"]?.toString()?.trim() ?: return ToolExecutionResult(false, "Missing package_name")
+            val pkg = when (val m = appInventory.findApp(input)) {
+                is AppMatchResult.Found -> m.app.packageName
+                else -> input
+            }
+
+            val pm = context.packageManager
+            return try {
+                val pkgInfo = pm.getPackageInfo(pkg, PackageManager.GET_PERMISSIONS)
+                val appInfo = pkgInfo.applicationInfo ?: return ToolExecutionResult(false, "ApplicationInfo null for $pkg")
+
+                val isSys = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
+                val grantedPerms = mutableListOf<String>()
+                val requested = pkgInfo.requestedPermissions
+                val flags = pkgInfo.requestedPermissionsFlags
+
+                if (requested != null && flags != null) {
+                    for (i in requested.indices) {
+                        if ((flags[i] and PackageManager.PERMISSION_GRANTED) != 0) {
+                            grantedPerms.add(requested[i].removePrefix("android.permission."))
+                        }
+                    }
+                }
+
+                val obj = JSONObject().apply {
+                    put("package", pkg)
+                    put("label", pm.getApplicationLabel(appInfo).toString())
+                    put("versionName", pkgInfo.versionName ?: "Unknown")
+                    put("isSystem", isSys)
+                    put("isEnabled", appInfo.enabled)
+                    put("grantedPermissionsCount", grantedPerms.size)
+                    put("samplePermissions", JSONArray(grantedPerms.take(15)))
+                }
+
+                ToolExecutionResult(true, obj.toString(2))
+            } catch (e: Exception) {
+                ToolExecutionResult(false, "Package $pkg not found on device: ${e.message}")
+            }
+        }
+    }
+
+    val listSystemPackagesTool = object : Tool {
+        override val name = "list_system_packages"
+        override val description = "Lists raw system packages installed via root pm command."
+        override val parametersSchema = mapOf(
+            "type" to "object",
+            "properties" to mapOf(
+                "filter" to mapOf("type" to "string", "description" to "Optional string filter.")
+            )
+        )
+
+        override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
+            val filter = args["filter"]?.toString()?.trim() ?: ""
+            val cmd = if (filter.isNotBlank()) "pm list packages -s | grep $filter" else "pm list packages -s"
+            val res = rootManager.execute(cmd)
+            return if (res.success) {
+                val pkgs = res.stdout.lines().map { it.removePrefix("package:").trim() }.filter { it.isNotBlank() }
+                ToolExecutionResult(true, "Found ${pkgs.size} system packages:\n" + pkgs.take(100).joinToString("\n"))
+            } else {
+                ToolExecutionResult(false, "Failed to list system packages: ${res.stderr}")
             }
         }
     }
@@ -105,7 +218,10 @@ class AppTools(
 
         override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
             val name = args["name"]?.toString() ?: return ToolExecutionResult(false, "Missing app name")
-            val pkg = findPackage(name) ?: name
+            val pkg = when (val m = appInventory.findApp(name)) {
+                is AppMatchResult.Found -> m.app.packageName
+                else -> name.trim()
+            }
             val res = rootManager.execute("pm clear $pkg")
             return if (res.success) {
                 ToolExecutionResult(true, "Cleared all data for $pkg")
@@ -128,38 +244,16 @@ class AppTools(
 
         override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
             val name = args["name"]?.toString() ?: return ToolExecutionResult(false, "Missing app name")
-            val pkg = findPackage(name) ?: name
+            val pkg = when (val m = appInventory.findApp(name)) {
+                is AppMatchResult.Found -> m.app.packageName
+                else -> name.trim()
+            }
             val res = rootManager.execute("pm trim-caches 999G && rm -rf /data/data/$pkg/cache/*")
             return if (res.success) {
                 ToolExecutionResult(true, "Cleared cache for $pkg")
             } else {
                 ToolExecutionResult(false, "Failed to clear cache: ${res.stderr}")
             }
-        }
-    }
-
-    val listInstalledAppsTool = object : Tool {
-        override val name = "list_installed_apps"
-        override val description = "Lists installed apps on the device, optionally filtered."
-        override val parametersSchema = mapOf(
-            "type" to "object",
-            "properties" to mapOf(
-                "filter" to mapOf("type" to "string", "description" to "Optional search filter.")
-            )
-        )
-
-        override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
-            val filter = args["filter"]?.toString()?.lowercase(Locale.ROOT) ?: ""
-            val pm = context.packageManager
-            val apps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
-                .map { app ->
-                    val label = pm.getApplicationLabel(app).toString()
-                    "$label (${app.packageName})"
-                }
-                .filter { if (filter.isBlank()) true else it.lowercase(Locale.ROOT).contains(filter) }
-                .take(40)
-
-            return ToolExecutionResult(true, apps.joinToString("\n"))
         }
     }
 
@@ -250,7 +344,8 @@ class AppTools(
 
     fun getAllTools(): List<Tool> = listOf(
         openAppTool, closeAppTool, clearAppDataTool, clearAppCacheTool,
-        listInstalledAppsTool, getForegroundAppTool, goHomeTool, goBackTool,
+        listInstalledAppsTool, getAppInfoTool, listSystemPackagesTool,
+        getForegroundAppTool, goHomeTool, goBackTool,
         openRecentsTool, openNotificationsTool, openQuickSettingsTool,
         lockScreenTool, wakeScreenTool
     )

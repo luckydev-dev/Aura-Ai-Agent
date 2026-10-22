@@ -130,6 +130,8 @@ class AudioTrackPlayer(private val context: Context) {
         }
     }
 
+    fun playPcmChunk(bytes: ByteArray) = enqueuePcm(bytes)
+
     /**
      * Instantly flushes the playback queue and stops current audio when barge-in occurs.
      */

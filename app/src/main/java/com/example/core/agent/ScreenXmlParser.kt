@@ -66,8 +66,8 @@ object ScreenXmlParser {
                 }
                 eventType = parser.next()
             }
-        } catch (_: Throwable) {
-            // Fallback for JVM unit tests without Android XML implementation
+        } catch (e: Throwable) {
+            android.util.Log.w("Aura", "XmlPullParser failed, falling back to regex: ${e.message}")
             return parseFallback(xmlContent)
         }
 
@@ -144,7 +144,8 @@ object ScreenXmlParser {
             } else {
                 Pair(0, 0)
             }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            android.util.Log.e("Aura", "Failed to parse bounds: $bounds", e)
             Pair(0, 0)
         }
     }

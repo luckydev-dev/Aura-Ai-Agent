@@ -3,7 +3,6 @@ package com.example.ui.screens
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
-import android.os.Build
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -19,6 +18,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -32,6 +32,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.example.core.live.CaptionState
 import com.example.core.live.LiveConnectionState
 import com.example.core.tools.ActionFeedItem
 import com.example.core.tools.ActionStatus
@@ -79,7 +80,6 @@ fun CallScreen(
         }
     }
 
-    // Safe produceState observables to prevent NullPointerException when service is null
     val connectionState by produceState<LiveConnectionState>(initialValue = LiveConnectionState.Disconnected, key1 = service) {
         val flow = service?.liveClient?.connectionState
         if (flow != null) {
@@ -134,30 +134,28 @@ fun CallScreen(
         }
     }
 
-    val userTranscript by produceState<String>(initialValue = "", key1 = service) {
-        val flow = service?.liveClient?.userTranscript
+    // Live Dual-Line Caption State from CaptionStateMachine
+    val captionState by produceState<CaptionState>(initialValue = CaptionState(), key1 = service) {
+        val flow = service?.liveClient?.captionState
         if (flow != null) {
             flow.collect { value = it }
         } else {
-            value = ""
+            value = CaptionState()
         }
     }
 
-    val modelTranscript by produceState<String>(initialValue = "", key1 = service) {
-        val flow = service?.liveClient?.modelTranscript
-        if (flow != null) {
-            flow.collect { value = it }
+    val showCaptionsPref by produceState<Boolean>(initialValue = true, key1 = service) {
+        if (service != null) {
+            service.preferences.showCaptions.collect { value = it }
         } else {
-            value = ""
+            value = true
         }
     }
 
-    // Effective call UI state: call active AND not in terminal/error state
     val isCallUiActive = isCallActive && connectionState !is LiveConnectionState.Error
 
     var isSpeakerOn by remember { mutableStateOf(true) }
 
-    // Synchronize speaker state from preferences
     LaunchedEffect(service) {
         if (service != null) {
             val prefSpeaker = service.preferences.useSpeaker.first()
@@ -194,6 +192,7 @@ fun CallScreen(
 
     // Determine current Orb state
     val orbState = when {
+        isMuted -> OrbState.IDLE
         connectionState is LiveConnectionState.Error -> OrbState.ERROR
         connectionState is LiveConnectionState.Reconnecting -> OrbState.RECONNECTING
         connectionState is LiveConnectionState.Connecting -> OrbState.IDLE
@@ -201,7 +200,7 @@ fun CallScreen(
         isAuraActing -> OrbState.ACTING
         speakerAmp > 0.04f -> OrbState.SPEAKING
         isAuraThinking -> OrbState.THINKING
-        micAmp > 0.04f && !isMuted -> OrbState.LISTENING
+        micAmp > 0.04f -> OrbState.LISTENING
         else -> OrbState.IDLE
     }
 
@@ -210,6 +209,14 @@ fun CallScreen(
     // Keyboard chat sheet toggle
     var showKeyboardInput by remember { mutableStateOf(false) }
     var keyboardText by remember { mutableStateOf("") }
+
+    // Caption scroll state for auto-scrolling
+    val captionScrollState = rememberScrollState()
+    LaunchedEffect(captionState.userText, captionState.auraText) {
+        if (captionScrollState.maxValue > 0) {
+            captionScrollState.animateScrollTo(captionScrollState.maxValue)
+        }
+    }
 
     Box(
         modifier = modifier
@@ -224,7 +231,7 @@ fun CallScreen(
                 .padding(horizontal = 20.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Top Bar with Timer and Quick Nav Actions
+            // Top Bar with Timer and Navigation Buttons
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -245,16 +252,17 @@ fun CallScreen(
                             .size(8.dp)
                             .clip(CircleShape)
                             .background(
-                                when (connectionState) {
-                                    is LiveConnectionState.Connected -> colors.success
-                                    is LiveConnectionState.Connecting, is LiveConnectionState.Reconnecting -> colors.warning
-                                    is LiveConnectionState.Error -> colors.danger
+                                when {
+                                    isMuted -> colors.warning
+                                    connectionState is LiveConnectionState.Connected -> colors.success
+                                    connectionState is LiveConnectionState.Connecting || connectionState is LiveConnectionState.Reconnecting -> colors.warning
+                                    connectionState is LiveConnectionState.Error -> colors.danger
                                     else -> colors.textTertiary
                                 }
                             )
                     )
                     Spacer(modifier = Modifier.width(8.dp))
-                    androidx.compose.foundation.text.BasicText(
+                    BasicText(
                         text = if (isCallUiActive) "%02d:%02d".format(callSeconds / 60, callSeconds % 60) else "Aura Ready",
                         style = typography.labelSmall.copy(color = colors.textPrimary)
                     )
@@ -293,7 +301,7 @@ fun CallScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.weight(0.12f))
+            Spacer(modifier = Modifier.weight(0.08f))
 
             // The Hero Aura Living Orb
             Box(
@@ -309,35 +317,40 @@ fun CallScreen(
                 AuraOrb(
                     state = orbState,
                     amplitude = activeAmplitude,
-                    size = 280.dp
+                    size = 250.dp
                 )
             }
 
-            // Orb State Status Label - derived strictly from connectionState
-            val stateLabel = when (connectionState) {
-                is LiveConnectionState.Connecting -> "Connecting..."
-                is LiveConnectionState.Reconnecting -> "Reconnecting..."
-                is LiveConnectionState.Connected -> when {
+            // Orb State Status Label
+            val stateLabel = when {
+                isMuted -> "Microphone Muted (Tap mic to unmute)"
+                connectionState is LiveConnectionState.Connecting -> "Connecting..."
+                connectionState is LiveConnectionState.Reconnecting -> "Reconnecting..."
+                connectionState is LiveConnectionState.Connected -> when {
                     speakerAmp > 0.04f -> "Speaking..."
                     isAuraActing -> "Operating device..."
                     isAuraThinking -> "Thinking..."
-                    micAmp > 0.04f && !isMuted -> "Hearing you..."
+                    micAmp > 0.04f -> "Hearing you..."
                     else -> "Listening for you..."
                 }
-                is LiveConnectionState.Error -> "Connection error"
-                LiveConnectionState.Disconnected -> if (isCallUiActive) "Connecting..." else "Tap orb or button to start call"
+                connectionState is LiveConnectionState.Error -> "Connection error"
+                else -> if (isCallUiActive) "Connecting..." else "Tap orb or button to start call"
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
-            androidx.compose.foundation.text.BasicText(
+            Spacer(modifier = Modifier.height(14.dp))
+            BasicText(
                 text = stateLabel,
                 style = typography.labelLarge.copy(
-                    color = if (orbState == OrbState.ERROR) colors.danger else colors.accentStart
+                    color = when {
+                        isMuted -> colors.warning
+                        orbState == OrbState.ERROR -> colors.danger
+                        else -> colors.accentStart
+                    }
                 ),
                 maxLines = 1
             )
 
-            Spacer(modifier = Modifier.weight(0.12f))
+            Spacer(modifier = Modifier.weight(0.08f))
 
             // Realtime Captions OR Full Scrollable Error Card
             if (connectionState is LiveConnectionState.Error) {
@@ -365,7 +378,7 @@ fun CallScreen(
                                 .background(colors.danger)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
-                        androidx.compose.foundation.text.BasicText(
+                        BasicText(
                             text = "Connection Error (Server Message)",
                             style = typography.labelLarge.copy(color = colors.danger)
                         )
@@ -374,17 +387,17 @@ fun CallScreen(
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .heightIn(min = 60.dp, max = 180.dp)
+                            .heightIn(min = 60.dp, max = 160.dp)
                             .verticalScroll(rememberScrollState())
                     ) {
                         Column {
-                            androidx.compose.foundation.text.BasicText(
+                            BasicText(
                                 text = errorMsg,
                                 style = typography.bodySmall.copy(color = colors.textPrimary)
                             )
                             if (hint != null) {
                                 Spacer(modifier = Modifier.height(6.dp))
-                                androidx.compose.foundation.text.BasicText(
+                                BasicText(
                                     text = hint,
                                     style = typography.labelSmall.copy(color = colors.warning)
                                 )
@@ -411,9 +424,7 @@ fun CallScreen(
                         )
                         AuraButton(
                             text = "Retry",
-                            onClick = {
-                                startCallWithPermission()
-                            },
+                            onClick = { startCallWithPermission() },
                             modifier = Modifier.weight(1f),
                             icon = AuraIcons.Refresh,
                             isPrimary = true,
@@ -421,40 +432,76 @@ fun CallScreen(
                         )
                     }
                 }
-            } else {
+            } else if (showCaptionsPref) {
+                // Section 1: BOTH lines visible at once, auto-scrolling to bottom, max ~35% height
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(min = 70.dp, max = 120.dp)
+                        .heightIn(min = 70.dp, max = 150.dp)
                         .clip(RoundedCornerShape(16.dp))
-                        .background(colors.surface.copy(alpha = 0.6f))
+                        .background(colors.surface.copy(alpha = 0.65f))
                         .border(1.dp, colors.border, RoundedCornerShape(16.dp))
-                        .padding(14.dp),
-                    verticalArrangement = Arrangement.Center,
-                    horizontalAlignment = Alignment.CenterHorizontally
+                        .padding(horizontal = 14.dp, vertical = 10.dp)
+                        .verticalScroll(captionScrollState)
                 ) {
-                    if (modelTranscript.isNotBlank()) {
-                        androidx.compose.foundation.text.BasicText(
-                            text = modelTranscript,
-                            style = typography.bodyLarge.copy(color = colors.textPrimary),
-                            maxLines = 3
-                        )
-                    } else if (userTranscript.isNotBlank()) {
-                        androidx.compose.foundation.text.BasicText(
-                            text = userTranscript,
-                            style = typography.bodyMedium.copy(color = colors.textSecondary),
-                            maxLines = 2
-                        )
+                    val hasUserText = captionState.userText.isNotBlank()
+                    val hasAuraText = captionState.auraText.isNotBlank()
+
+                    if (!hasUserText && !hasAuraText) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(50.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            BasicText(
+                                text = if (isCallUiActive) "Speak naturally in Hinglish. You can interrupt Aura anytime." else "Say 'Hey Aura' or tap the mic to start...",
+                                style = typography.bodySmall.copy(color = colors.textTertiary)
+                            )
+                        }
                     } else {
-                        androidx.compose.foundation.text.BasicText(
-                            text = if (isCallUiActive) "Speak naturally. You can interrupt Aura anytime." else "Say 'Open WhatsApp', 'Turn on Bluetooth', 'Read screen'...",
-                            style = typography.bodySmall.copy(color = colors.textTertiary)
-                        )
+                        // User transcription line (secondary color)
+                        if (hasUserText) {
+                            AnimatedVisibility(
+                                visible = true,
+                                enter = fadeIn() + expandVertically()
+                            ) {
+                                Column(modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp)) {
+                                    BasicText(
+                                        text = "You",
+                                        style = typography.labelSmall.copy(color = colors.textTertiary)
+                                    )
+                                    BasicText(
+                                        text = captionState.userText,
+                                        style = typography.bodyMedium.copy(color = colors.textSecondary)
+                                    )
+                                }
+                            }
+                        }
+
+                        // Aura response line (primary color)
+                        if (hasAuraText) {
+                            AnimatedVisibility(
+                                visible = true,
+                                enter = fadeIn() + expandVertically()
+                            ) {
+                                Column(modifier = Modifier.fillMaxWidth()) {
+                                    BasicText(
+                                        text = "Aura",
+                                        style = typography.labelSmall.copy(color = colors.accentStart)
+                                    )
+                                    BasicText(
+                                        text = captionState.auraText,
+                                        style = typography.bodyLarge.copy(color = colors.textPrimary)
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(14.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
             // Realtime Action Feed Chips
             if (actionFeed.isNotEmpty()) {
@@ -484,14 +531,14 @@ fun CallScreen(
                                     )
                             )
                             Spacer(modifier = Modifier.width(6.dp))
-                            androidx.compose.foundation.text.BasicText(
+                            BasicText(
                                 text = item.description,
                                 style = typography.labelSmall.copy(color = colors.textSecondary)
                             )
                         }
                     }
                 }
-                Spacer(modifier = Modifier.height(14.dp))
+                Spacer(modifier = Modifier.height(12.dp))
             }
 
             // Bottom Call Control Bar
@@ -525,7 +572,7 @@ fun CallScreen(
                         .size(52.dp)
                         .clip(CircleShape)
                         .background(if (isMuted) colors.warning.copy(alpha = 0.25f) else colors.surfaceRaised)
-                        .border(1.dp, colors.border, CircleShape)
+                        .border(1.dp, if (isMuted) colors.warning else colors.border, CircleShape)
                         .pointerInput(Unit) {
                             awaitEachGesture {
                                 val down = awaitFirstDown(requireUnconsumed = false)
@@ -538,16 +585,13 @@ fun CallScreen(
                                     if (!pressed) {
                                         val duration = System.currentTimeMillis() - startTime
                                         if (isHolding) {
-                                            // Released hold-to-talk -> mute back
                                             service?.audioStreamer?.setMuted(true)
                                         } else if (duration < 350) {
-                                            // Short tap -> toggle mute
                                             val cur = service?.audioStreamer?.isMuted?.value ?: false
                                             service?.audioStreamer?.setMuted(!cur)
                                         }
                                         break
                                     } else if (!isHolding && System.currentTimeMillis() - startTime >= 350) {
-                                        // Held down for 350ms -> Push-to-Talk unmutes
                                         isHolding = true
                                         service?.audioStreamer?.setMuted(false)
                                     }
@@ -638,7 +682,7 @@ fun CallScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    androidx.compose.foundation.text.BasicText(
+                    BasicText(
                         text = "Type to Aura",
                         style = typography.titleMedium.copy(color = colors.textPrimary)
                     )
@@ -704,7 +748,7 @@ private fun getErrorHint(errorMessage: String): String? {
                 errorMessage.contains("thinking level", ignoreCase = true) || errorMessage.contains("thinkingLevel", ignoreCase = true) ->
                     "Hint (Code 1007): Model requires a thinking level. Choose LOW, MEDIUM, or HIGH in Settings."
                 errorMessage.contains("realtime_input_config", ignoreCase = true) ->
-                    "Hint (Code 1007): Offending field 'realtime_input_config' is not supported."
+                    "Hint (Code 1007): Server rejected realtime_input_config. Aura will auto-drop this field."
                 errorMessage.contains("tools", ignoreCase = true) ->
                     "Hint (Code 1007): Tool configuration was rejected by server."
                 else ->

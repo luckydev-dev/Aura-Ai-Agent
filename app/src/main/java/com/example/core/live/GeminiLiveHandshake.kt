@@ -5,25 +5,20 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okio.ByteString
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
 /**
  * Shared helper for Gemini Live BidiGenerateContent WebSocket handshake,
- * frame serialization, deserialization, API key validation, model profile configuration,
+ * payload serialization, deserialization, API key validation, model profile configuration,
  * dynamic live model fetching, and diagnostics logging.
- *
- * Guarantees that both the main GeminiLiveClient and the SettingsScreen "Test Connection"
- * feature use identical JSON structures and frame parsers.
  */
 object GeminiLiveHandshake {
     private const val TAG = "Aura"
 
     /**
-     * Builds the standard Gemini Live setup JSON payload according to the BidiGenerateContent spec
-     * using explicit per-model setup profiles.
+     * Builds the standard Gemini Live setup JSON payload according to the BidiGenerateContent spec.
      */
     fun buildSetupMessageJson(
         model: String,
@@ -31,11 +26,13 @@ object GeminiLiveHandshake {
         systemPrompt: String = "",
         resumptionHandle: String = "",
         toolDeclarationsJson: List<Map<String, Any>> = emptyList(),
-        thinkingLevel: String = "LOW"
+        thinkingLevel: String = "LOW",
+        interruptionSensitivity: String = "Low",
+        allowInterrupting: Boolean = true,
+        unsupportedFields: Set<String> = emptySet()
     ): String {
         val modelPath = if (model.startsWith("models/")) model else "models/$model"
         val cleanModel = model.removePrefix("models/").trim().lowercase()
-
         val isExtendedThinking = cleanModel == "gemini-3.8-live-extended-thinking"
 
         val setupObj = JSONObject().apply {
@@ -43,13 +40,19 @@ object GeminiLiveHandshake {
 
             val genConfig = JSONObject().apply {
                 put("responseModalities", JSONArray().apply { put("AUDIO") })
-                put("speechConfig", JSONObject().apply {
+
+                val speechConfig = JSONObject().apply {
                     put("voiceConfig", JSONObject().apply {
                         put("prebuiltVoiceConfig", JSONObject().apply {
                             put("voiceName", voice.ifBlank { "Aoede" })
                         })
                     })
-                })
+                    // Add languageCode = "hi-IN" if not blacklisted for this model
+                    if (!unsupportedFields.contains("speechConfig_languageCode")) {
+                        put("languageCode", "hi-IN")
+                    }
+                }
+                put("speechConfig", speechConfig)
 
                 // Extended thinking profile
                 if (isExtendedThinking) {
@@ -66,17 +69,49 @@ object GeminiLiveHandshake {
             put("generationConfig", genConfig)
 
             // Audio transcription configs
-            put("inputAudioTranscription", JSONObject())
+            val inputAudioObj = JSONObject()
+            if (!unsupportedFields.contains("inputAudioTranscription_languageCodes")) {
+                inputAudioObj.put("languageCodes", JSONArray().apply {
+                    put("hi-IN")
+                    put("en-IN")
+                })
+            }
+            put("inputAudioTranscription", inputAudioObj)
             put("outputAudioTranscription", JSONObject())
 
-            // Resumption handle if supplied from a prior session
+            // Realtime Input Config: VAD sensitivity and Activity Handling
+            if (!unsupportedFields.contains("realtimeInputConfig")) {
+                val (startSensitivity, prefixPadding, silenceDuration) = when (interruptionSensitivity.lowercase()) {
+                    "high" -> Triple("START_SENSITIVITY_HIGH", 40, 250)
+                    "medium" -> Triple("START_SENSITIVITY_LOW", 80, 400)
+                    else -> Triple("START_SENSITIVITY_LOW", 120, 600) // "low" (default)
+                }
+
+                val autoDetection = JSONObject().apply {
+                    put("disabled", false)
+                    put("startOfSpeechSensitivity", startSensitivity)
+                    put("prefixPaddingMs", prefixPadding)
+                    put("silenceDurationMs", silenceDuration)
+                }
+
+                val realtimeConfig = JSONObject().apply {
+                    put("automaticActivityDetection", autoDetection)
+                    put(
+                        "activityHandling",
+                        if (allowInterrupting) "START_OF_ACTIVITY_INTERRUPTS" else "NO_INTERRUPTION"
+                    )
+                }
+                put("realtimeInputConfig", realtimeConfig)
+            }
+
+            // Resumption handle if supplied
             if (resumptionHandle.isNotBlank()) {
                 put("sessionResumption", JSONObject().apply {
                     put("handle", resumptionHandle)
                 })
             }
 
-            // System instruction if configured
+            // System instruction
             if (systemPrompt.isNotBlank()) {
                 put("systemInstruction", JSONObject().apply {
                     put("parts", JSONArray().apply {
@@ -85,7 +120,7 @@ object GeminiLiveHandshake {
                 })
             }
 
-            // Function declarations for device control tools
+            // Function declarations for tools
             if (toolDeclarationsJson.isNotEmpty()) {
                 val declarationsArray = JSONArray()
                 for (tool in toolDeclarationsJson) {
@@ -174,7 +209,6 @@ object GeminiLiveHandshake {
                 pageToken = json.optString("nextPageToken").ifBlank { null }
             } while (pageToken != null)
 
-            // If empty, return standard live models as minimum guarantee
             if (liveModels.isEmpty()) {
                 liveModels.addAll(listOf("gemini-3.8-live", "gemini-3.8-live-extended-thinking"))
             }
@@ -186,38 +220,23 @@ object GeminiLiveHandshake {
         }
     }
 
-    /**
-     * Safely masks an API key, showing only the first 4 characters.
-     */
     fun maskApiKey(key: String): String {
         val trimmed = key.trim()
         if (trimmed.isEmpty()) return "(Not set)"
-        return if (trimmed.length <= 4) {
-            "${trimmed}***"
-        } else {
-            "${trimmed.take(4)}...${trimmed.takeLast(2)}"
-        }
+        return if (trimmed.length <= 4) "${trimmed}***" else "${trimmed.take(4)}...${trimmed.takeLast(2)}"
     }
 
-    /**
-     * Classifies the API key format and provides a diagnosis string.
-     */
     fun getKeyTypeDescription(key: String): String {
         val trimmed = key.trim()
         return when {
             trimmed.isEmpty() -> "Not configured"
             trimmed.startsWith("AQ.", ignoreCase = true) || trimmed.startsWith("AQ") ->
                 "AQ.*** (New AI Studio Auth Key format - if rejected with 401 ACCESS_TOKEN_TYPE_UNSUPPORTED, use an AIza*** API key)"
-            trimmed.startsWith("AIza") ->
-                "AIza*** (Standard Google Cloud / AI Studio API key)"
-            else ->
-                "${trimmed.take(4)}*** (Custom key format)"
+            trimmed.startsWith("AIza") -> "AIza*** (Standard Google Cloud / AI Studio API key)"
+            else -> "${trimmed.take(4)}*** (Custom key format)"
         }
     }
 
-    /**
-     * Provides a helpful diagnostic hint when an authentication error occurs.
-     */
     fun getAuthHintForError(key: String, errorText: String): String? {
         val trimmed = key.trim()
         val isAuthFailure = errorText.contains("401") || errorText.contains("403") ||
@@ -232,9 +251,9 @@ object GeminiLiveHandshake {
         }
 
         return if (trimmed.startsWith("AQ", ignoreCase = true)) {
-            "Auth Hint: Your key begins with '${trimmed.take(4)}...' (OAuth/Bearer-like token). The Gemini Live WebSocket endpoint requires a Google API Key starting with 'AIza...' (generated in Google AI Studio or Cloud Console). Endpoints often reject 'AQ.' keys with 401 ACCESS_TOKEN_TYPE_UNSUPPORTED."
+            "Auth Hint: Your key begins with '${trimmed.take(4)}...' (OAuth/Bearer-like token). The Gemini Live WebSocket endpoint requires a Google API Key starting with 'AIza...'. Endpoints reject 'AQ.' keys with 401 ACCESS_TOKEN_TYPE_UNSUPPORTED."
         } else if (trimmed.startsWith("AIza")) {
-            "Auth Hint: Your key begins with 'AIza...'. Verify that the Generative Language API is enabled and that the key has quota in Google AI Studio."
+            "Auth Hint: Your key begins with 'AIza...'. Verify that the Generative Language API is enabled and has quota."
         } else {
             "Auth Hint: Check that a valid Gemini API key is configured in Settings."
         }
@@ -253,11 +272,6 @@ object GeminiLiveHandshake {
         val parseError: String? = null
     )
 
-    /**
-     * Handles raw frame logging (every incoming frame) to Diagnostics and Logcat tag "Aura".
-     * Inspects JSON, catches parse exceptions without silently dropping them,
-     * and extracts setupComplete, goAway, and resumption tokens.
-     */
     fun parseAndLogIncomingFrame(
         rawText: String,
         isBinary: Boolean,
@@ -266,10 +280,8 @@ object GeminiLiveHandshake {
         val byteLength = rawText.toByteArray(Charsets.UTF_8).size
         val preview = rawText.take(300)
 
-        // 1. Raw frame logging to Diagnostics and Logcat
         diagnostics?.recordIncomingFrame(isBinary, byteLength, rawText)
 
-        // 2. Parse JSON safely without swallowing parse failures
         var rootJson: JSONObject? = null
         var parseError: String? = null
         var isSetup = false
@@ -288,16 +300,12 @@ object GeminiLiveHandshake {
                 diagnostics?.recordMessage(k)
             }
 
-            if (json.has("setupComplete")) {
-                isSetup = true
-            }
+            if (json.has("setupComplete")) isSetup = true
 
             if (json.has("sessionResumptionUpdate")) {
                 val sru = json.optJSONObject("sessionResumptionUpdate")
                 val handle = sru?.optString("handle")
-                if (!handle.isNullOrBlank()) {
-                    resumptionHandle = handle
-                }
+                if (!handle.isNullOrBlank()) resumptionHandle = handle
             }
 
             if (json.has("goAway")) {
@@ -307,7 +315,7 @@ object GeminiLiveHandshake {
             }
         } catch (e: Exception) {
             parseError = e.message ?: "Invalid JSON"
-            Log.e(TAG, "Failed to parse incoming frame JSON (${if (isBinary) "BINARY" else "TEXT"}, $byteLength bytes): ${e.message}. Raw text: $preview", e)
+            Log.e(TAG, "Failed to parse incoming frame JSON (${if (isBinary) "BINARY" else "TEXT"}, $byteLength bytes): ${e.message}. Raw: $preview", e)
             diagnostics?.log(TAG, "JSON Parse Error: ${e.message} in frame: ${preview.take(100)}")
         }
 
