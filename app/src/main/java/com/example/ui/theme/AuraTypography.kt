@@ -31,6 +31,12 @@ data class AuraTypography(
         fontSize = 18.sp,
         lineHeight = 24.sp
     ),
+    val titleSmall: TextStyle = TextStyle(
+        fontFamily = SoraFontFamily,
+        fontWeight = FontWeight.Medium,
+        fontSize = 15.sp,
+        lineHeight = 20.sp
+    ),
     val bodyLarge: TextStyle = TextStyle(
         fontFamily = InterFontFamily,
         fontWeight = FontWeight.Normal,
@@ -54,6 +60,12 @@ data class AuraTypography(
         fontWeight = FontWeight.SemiBold,
         fontSize = 14.sp,
         lineHeight = 18.sp
+    ),
+    val labelMedium: TextStyle = TextStyle(
+        fontFamily = InterFontFamily,
+        fontWeight = FontWeight.Medium,
+        fontSize = 12.sp,
+        lineHeight = 16.sp
     ),
     val labelSmall: TextStyle = TextStyle(
         fontFamily = InterFontFamily,

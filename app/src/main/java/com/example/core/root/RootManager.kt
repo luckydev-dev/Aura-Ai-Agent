@@ -17,19 +17,31 @@ import java.util.concurrent.TimeUnit
 class RootManager(private val context: Context) {
     companion object {
         private const val TAG = "Aura"
+        @Volatile
+        private var isBuilderConfigured = false
+
+        @Synchronized
+        fun ensureConfigured() {
+            if (isBuilderConfigured) return
+            try {
+                Shell.enableVerboseLogging = false
+                Shell.setDefaultBuilder(
+                    Shell.Builder.create()
+                        .setFlags(Shell.FLAG_REDIRECT_STDERR)
+                        .setTimeout(15)
+                )
+                isBuilderConfigured = true
+            } catch (e: IllegalStateException) {
+                // Main shell was already created by LibSU; builder cannot and does not need to be reset
+                isBuilderConfigured = true
+            } catch (e: Exception) {
+                Log.e(TAG, "Error initializing Shell builder: ${e.message}", e)
+            }
+        }
     }
 
     init {
-        try {
-            Shell.enableVerboseLogging = false
-            Shell.setDefaultBuilder(
-                Shell.Builder.create()
-                    .setFlags(Shell.FLAG_REDIRECT_STDERR)
-                    .setTimeout(15)
-            )
-        } catch (e: Exception) {
-            Log.e(TAG, "Error initializing Shell builder", e)
-        }
+        ensureConfigured()
     }
 
     /**

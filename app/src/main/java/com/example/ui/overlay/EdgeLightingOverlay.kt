@@ -6,7 +6,6 @@ import android.os.Build
 import android.provider.Settings
 import android.util.Log
 import android.view.WindowManager
-import com.example.core.live.CaptionState
 
 class EdgeLightingOverlay(private val context: Context) {
 
@@ -17,6 +16,10 @@ class EdgeLightingOverlay(private val context: Context) {
     private val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
     private var edgeView: EdgeLightingView? = null
     private var isOverlayAttached = false
+
+    private var currentDepthPercent = 22
+    private var currentIntensity = 1.0f
+    private var currentColorTheme = "Aura"
 
     fun show(): Boolean {
         if (isOverlayAttached) return true
@@ -52,7 +55,11 @@ class EdgeLightingOverlay(private val context: Context) {
                 params.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
             }
 
-            val view = EdgeLightingView(context)
+            val view = EdgeLightingView(context).apply {
+                depthPercent = currentDepthPercent
+                intensity = currentIntensity
+                colorTheme = currentColorTheme
+            }
             windowManager.addView(view, params)
             edgeView = view
             isOverlayAttached = true
@@ -75,20 +82,19 @@ class EdgeLightingOverlay(private val context: Context) {
         edgeView?.updateAmplitudes(mic, speaker)
     }
 
-    fun updateCaptionState(caption: CaptionState) {
-        edgeView?.updateCaptionState(caption)
-    }
-
-    fun setThickness(thicknessDp: Float) {
-        edgeView?.strokeThicknessDp = thicknessDp
+    fun setDepthPercent(depth: Int) {
+        currentDepthPercent = depth
+        edgeView?.depthPercent = depth
     }
 
     fun setIntensity(intensity: Float) {
+        currentIntensity = intensity
         edgeView?.intensity = intensity
     }
 
-    fun setShowCaptions(show: Boolean) {
-        edgeView?.showCaptions = show
+    fun setColorTheme(theme: String) {
+        currentColorTheme = theme
+        edgeView?.colorTheme = theme
     }
 
     fun hide() {

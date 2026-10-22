@@ -3,6 +3,7 @@ package com.example.ui.screens
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -65,23 +66,32 @@ fun CallScreen(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
         if (granted) {
-            AuraForegroundService.startCall(context)
+            try {
+                AuraForegroundService.startCall(context)
+            } catch (e: Exception) {
+                Log.e("Aura", "Failed to start call after permission granted: ${e.message}", e)
+            }
         } else {
             Toast.makeText(context, "Microphone permission is required for Aura voice call", Toast.LENGTH_LONG).show()
         }
     }
 
     fun startCallWithPermission() {
-        val hasMic = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-        if (hasMic) {
-            AuraForegroundService.startCall(context)
-        } else {
-            micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        try {
+            val hasMic = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+            if (hasMic) {
+                AuraForegroundService.startCall(context)
+            } else {
+                micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            }
+        } catch (e: Exception) {
+            Log.e("Aura", "Failed to launch permission/call: ${e.message}", e)
+            Toast.makeText(context, "Unable to start call: ${e.message}", Toast.LENGTH_SHORT).show()
         }
     }
 
     val connectionState by produceState<LiveConnectionState>(initialValue = LiveConnectionState.Disconnected, key1 = service) {
-        val flow = service?.liveClient?.connectionState
+        val flow = runCatching { service?.liveClient?.connectionState }.getOrNull()
         if (flow != null) {
             flow.collect { value = it }
         } else {
@@ -90,7 +100,7 @@ fun CallScreen(
     }
 
     val micAmp by produceState<Float>(initialValue = 0f, key1 = service) {
-        val flow = service?.audioStreamer?.micAmplitude
+        val flow = runCatching { service?.audioStreamer?.micAmplitude }.getOrNull()
         if (flow != null) {
             flow.collect { value = it }
         } else {
@@ -99,7 +109,7 @@ fun CallScreen(
     }
 
     val speakerAmp by produceState<Float>(initialValue = 0f, key1 = service) {
-        val flow = service?.audioPlayer?.speakerAmplitude
+        val flow = runCatching { service?.audioPlayer?.speakerAmplitude }.getOrNull()
         if (flow != null) {
             flow.collect { value = it }
         } else {
@@ -108,7 +118,7 @@ fun CallScreen(
     }
 
     val isMuted by produceState<Boolean>(initialValue = false, key1 = service) {
-        val flow = service?.audioStreamer?.isMuted
+        val flow = runCatching { service?.audioStreamer?.isMuted }.getOrNull()
         if (flow != null) {
             flow.collect { value = it }
         } else {
@@ -117,7 +127,7 @@ fun CallScreen(
     }
 
     val isAuraActing by produceState<Boolean>(initialValue = false, key1 = service) {
-        val flow = service?.liveClient?.isAuraActing
+        val flow = runCatching { service?.liveClient?.isAuraActing }.getOrNull()
         if (flow != null) {
             flow.collect { value = it }
         } else {
@@ -126,7 +136,7 @@ fun CallScreen(
     }
 
     val isAuraThinking by produceState<Boolean>(initialValue = false, key1 = service) {
-        val flow = service?.liveClient?.isAuraThinking
+        val flow = runCatching { service?.liveClient?.isAuraThinking }.getOrNull()
         if (flow != null) {
             flow.collect { value = it }
         } else {
@@ -136,7 +146,7 @@ fun CallScreen(
 
     // Live Dual-Line Caption State from CaptionStateMachine
     val captionState by produceState<CaptionState>(initialValue = CaptionState(), key1 = service) {
-        val flow = service?.liveClient?.captionState
+        val flow = runCatching { service?.liveClient?.captionState }.getOrNull()
         if (flow != null) {
             flow.collect { value = it }
         } else {
@@ -145,8 +155,9 @@ fun CallScreen(
     }
 
     val showCaptionsPref by produceState<Boolean>(initialValue = true, key1 = service) {
-        if (service != null) {
-            service.preferences.showCaptions.collect { value = it }
+        val prefFlow = runCatching { service?.preferences?.showCaptions }.getOrNull()
+        if (prefFlow != null) {
+            prefFlow.collect { value = it }
         } else {
             value = true
         }
@@ -303,6 +314,37 @@ fun CallScreen(
 
             Spacer(modifier = Modifier.weight(0.08f))
 
+            // Reconnecting banner
+            AnimatedVisibility(
+                visible = connectionState is LiveConnectionState.Reconnecting,
+                enter = fadeIn() + expandVertically(),
+                exit = fadeOut() + shrinkVertically()
+            ) {
+                val recon = connectionState as? LiveConnectionState.Reconnecting
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 8.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(colors.warning.copy(alpha = 0.2f))
+                        .border(1.dp, colors.warning.copy(alpha = 0.5f), RoundedCornerShape(12.dp))
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(colors.warning)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    BasicText(
+                        text = "Reconnecting (Attempt ${recon?.attempt ?: 1}): ${recon?.reason?.ifBlank { "Re-establishing audio" } ?: "Reconnecting"}...",
+                        style = typography.labelSmall.copy(color = colors.warning)
+                    )
+                }
+            }
+
             // The Hero Aura Living Orb
             Box(
                 modifier = Modifier
@@ -333,6 +375,7 @@ fun CallScreen(
                     micAmp > 0.04f -> "Hearing you..."
                     else -> "Listening for you..."
                 }
+                connectionState is LiveConnectionState.Ended -> "Session Ended"
                 connectionState is LiveConnectionState.Error -> "Connection error"
                 else -> if (isCallUiActive) "Connecting..." else "Tap orb or button to start call"
             }
@@ -344,6 +387,7 @@ fun CallScreen(
                     color = when {
                         isMuted -> colors.warning
                         orbState == OrbState.ERROR -> colors.danger
+                        connectionState is LiveConnectionState.Ended -> colors.textSecondary
                         else -> colors.accentStart
                     }
                 ),
@@ -352,8 +396,37 @@ fun CallScreen(
 
             Spacer(modifier = Modifier.weight(0.08f))
 
-            // Realtime Captions OR Full Scrollable Error Card
-            if (connectionState is LiveConnectionState.Error) {
+            // Realtime Captions OR Full Scrollable Error Card OR Session Ended Card
+            if (connectionState is LiveConnectionState.Ended) {
+                val endedReason = (connectionState as LiveConnectionState.Ended).reason
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(colors.surface.copy(alpha = 0.85f))
+                        .border(1.dp, colors.border, RoundedCornerShape(16.dp))
+                        .padding(14.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    BasicText(
+                        text = "Session Completed",
+                        style = typography.titleSmall.copy(color = colors.textPrimary)
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    BasicText(
+                        text = endedReason.ifBlank { "Session closed peacefully." },
+                        style = typography.bodySmall.copy(color = colors.textSecondary)
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    AuraButton(
+                        text = "Start New Call",
+                        onClick = { startCallWithPermission() },
+                        icon = AuraIcons.Refresh,
+                        isPrimary = true,
+                        testTag = "start_new_call_btn"
+                    )
+                }
+            } else if (connectionState is LiveConnectionState.Error) {
                 val errorMsg = (connectionState as LiveConnectionState.Error).message
                 val hint = getErrorHint(errorMsg)
                 val fullCopyText = if (hint != null) "$errorMsg\n\n$hint" else errorMsg
@@ -539,6 +612,41 @@ fun CallScreen(
                     }
                 }
                 Spacer(modifier = Modifier.height(12.dp))
+            }
+            val quickPrompts = remember {
+                listOf(
+                    "What's on my screen?",
+                    "Turn off Wi-Fi",
+                    "Take screenshot",
+                    "Check WhatsApp",
+                    "List my saved routines"
+                )
+            }
+            if (isCallUiActive) {
+                LazyRow(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(quickPrompts) { prompt ->
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(16.dp))
+                                .background(colors.surfaceRaised)
+                                .border(1.dp, colors.border, RoundedCornerShape(16.dp))
+                                .clickable {
+                                    service?.liveClient?.sendTextMessage(prompt)
+                                }
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                        ) {
+                            BasicText(
+                                text = prompt,
+                                style = typography.labelSmall.copy(color = colors.accentStart)
+                            )
+                        }
+                    }
+                }
             }
 
             // Bottom Call Control Bar

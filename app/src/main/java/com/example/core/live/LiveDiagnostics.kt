@@ -107,6 +107,22 @@ class LiveDiagnostics {
     private val _appInventorySize = MutableStateFlow("0 apps")
     val appInventorySize: StateFlow<String> = _appInventorySize.asStateFlow()
 
+    // Token Usage & Session Stats
+    private val _reconnectCount = MutableStateFlow(0)
+    val reconnectCount: StateFlow<Int> = _reconnectCount.asStateFlow()
+
+    private val _promptTokens = MutableStateFlow(0)
+    val promptTokens: StateFlow<Int> = _promptTokens.asStateFlow()
+
+    private val _candidateTokens = MutableStateFlow(0)
+    val candidateTokens: StateFlow<Int> = _candidateTokens.asStateFlow()
+
+    private val _totalTokens = MutableStateFlow(0)
+    val totalTokens: StateFlow<Int> = _totalTokens.asStateFlow()
+
+    private val _sessionStartTimeMs = MutableStateFlow(0L)
+    val sessionStartTimeMs: StateFlow<Long> = _sessionStartTimeMs.asStateFlow()
+
     private val _thoughtHistory = MutableStateFlow<List<String>>(emptyList())
     val thoughtHistory: StateFlow<List<String>> = _thoughtHistory.asStateFlow()
 
@@ -142,6 +158,15 @@ class LiveDiagnostics {
     fun setAudioTrackState(state: String) { _audioTrackState.value = state }
     fun recordAudioSent(bytes: Long) { _bytesAudioSent.value += bytes }
     fun recordAudioReceived(bytes: Long) { _bytesAudioReceived.value += bytes }
+
+    fun recordUsage(prompt: Int, candidates: Int, total: Int) {
+        _promptTokens.value += prompt
+        _candidateTokens.value += candidates
+        _totalTokens.value += total
+    }
+    fun incrementReconnectCount() { _reconnectCount.value += 1 }
+    fun resetReconnectCount() { _reconnectCount.value = 0 }
+    fun setSessionStartTime(timeMs: Long) { _sessionStartTimeMs.value = timeMs }
 
     fun setWakeWordState(state: String) { _wakeWordState.value = state }
     fun setModelDownloadState(state: String) { _modelDownloadState.value = state }

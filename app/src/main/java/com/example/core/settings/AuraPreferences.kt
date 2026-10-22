@@ -47,11 +47,26 @@ class AuraPreferences(
         val KEY_WAKE_WORD_ENGINE = stringPreferencesKey("wake_word_engine")
         val KEY_WAKE_WORD_SENSITIVITY = stringPreferencesKey("wake_word_sensitivity")
 
-        // Overlays
+        // Overlays & Edge Lighting
         val KEY_EDGE_LIGHTING_ENABLED = booleanPreferencesKey("edge_lighting_enabled")
         val KEY_EDGE_LIGHTING_THICKNESS = intPreferencesKey("edge_lighting_thickness")
+        val KEY_EDGE_LIGHTING_DEPTH_PERCENT = intPreferencesKey("edge_lighting_depth_percent") // 8 to 40, default 22
+        val KEY_EDGE_LIGHTING_THEME = stringPreferencesKey("edge_lighting_theme") // "Aura", "Ocean", "Sunset", "Mono"
+        val KEY_EDGE_LIGHTING_SHOW_IN_APP = booleanPreferencesKey("edge_lighting_show_in_app") // default true
+        val KEY_EDGE_LIGHTING_SHOW_WAKE = booleanPreferencesKey("edge_lighting_show_wake") // default false
         val KEY_EDGE_LIGHTING_INTENSITY = floatPreferencesKey("edge_lighting_intensity")
         val KEY_OVERLAY_ENABLED = booleanPreferencesKey("overlay_enabled")
+        val KEY_FLOATING_CAPTIONS_ENABLED = booleanPreferencesKey("floating_captions_enabled")
+
+        // Idle & Screen Timeout
+        val KEY_IDLE_SILENCE_HANGUP_MINUTES = intPreferencesKey("idle_silence_hangup_minutes") // default 5 min
+        val KEY_KEEP_ALIVE_SCREEN_OFF = booleanPreferencesKey("keep_alive_screen_off") // default false
+        val KEY_SCREEN_OFF_TIMEOUT_MINUTES = intPreferencesKey("screen_off_timeout_minutes") // default 3 min
+
+        // Autonomous Agent Planner
+        val KEY_PLANNER_MODEL_NAME = stringPreferencesKey("planner_model_name") // default "gemini-2.5-flash"
+        val KEY_PLANNER_USE_SCREENSHOTS = booleanPreferencesKey("planner_use_screenshots") // default true
+        val KEY_PLANNER_MAX_TIME_SECONDS = intPreferencesKey("planner_max_time_seconds") // default 180
 
         // Persona & Owner
         val KEY_OWNER_NAME = stringPreferencesKey("owner_name")
@@ -226,8 +241,55 @@ class AuraPreferences(
         it[KEY_EDGE_LIGHTING_THICKNESS] ?: 8
     }
 
+    val edgeLightingDepthPercent: Flow<Int> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_EDGE_LIGHTING_DEPTH_PERCENT] ?: 22
+    }
+
+    val edgeLightingTheme: Flow<String> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_EDGE_LIGHTING_THEME] ?: "Aura"
+    }
+
+    val edgeLightingShowInApp: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_EDGE_LIGHTING_SHOW_IN_APP] ?: true
+    }
+
+    val edgeLightingShowWake: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_EDGE_LIGHTING_SHOW_WAKE] ?: false
+    }
+
     val edgeLightingIntensity: Flow<Float> = context.dataStore.data.catch { emitDefaults(it) }.map {
         it[KEY_EDGE_LIGHTING_INTENSITY] ?: 1.0f
+    }
+
+    val floatingCaptionsEnabled: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_FLOATING_CAPTIONS_ENABLED] ?: true
+    }
+
+    val idleSilenceHangupMinutes: Flow<Int> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_IDLE_SILENCE_HANGUP_MINUTES] ?: 5
+    }
+    val idleSilenceMinutes: Flow<Int> get() = idleSilenceHangupMinutes
+
+    val keepAliveScreenOff: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_KEEP_ALIVE_SCREEN_OFF] ?: false
+    }
+
+    val screenOffTimeoutMinutes: Flow<Int> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_SCREEN_OFF_TIMEOUT_MINUTES] ?: 3
+    }
+
+    val plannerModelName: Flow<String> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_PLANNER_MODEL_NAME] ?: "gemini-2.5-flash"
+    }
+    val plannerModel: Flow<String> get() = plannerModelName
+
+    val plannerUseScreenshots: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_PLANNER_USE_SCREENSHOTS] ?: true
+    }
+    val useScreenshotInPlanner: Flow<Boolean> get() = plannerUseScreenshots
+
+    val plannerMaxTimeSeconds: Flow<Int> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_PLANNER_MAX_TIME_SECONDS] ?: 180
     }
 
     val ownerName: Flow<String> = context.dataStore.data.catch { emitDefaults(it) }.map {
@@ -318,7 +380,18 @@ class AuraPreferences(
     suspend fun setWakeWordSensitivity(sens: String) = context.dataStore.edit { it[KEY_WAKE_WORD_SENSITIVITY] = sens }
     suspend fun setEdgeLightingEnabled(enabled: Boolean) = context.dataStore.edit { it[KEY_EDGE_LIGHTING_ENABLED] = enabled }
     suspend fun setEdgeLightingThickness(thickness: Int) = context.dataStore.edit { it[KEY_EDGE_LIGHTING_THICKNESS] = thickness }
+    suspend fun setEdgeLightingDepthPercent(depth: Int) = context.dataStore.edit { it[KEY_EDGE_LIGHTING_DEPTH_PERCENT] = depth.coerceIn(8, 40) }
+    suspend fun setEdgeLightingTheme(theme: String) = context.dataStore.edit { it[KEY_EDGE_LIGHTING_THEME] = theme }
+    suspend fun setEdgeLightingShowInApp(show: Boolean) = context.dataStore.edit { it[KEY_EDGE_LIGHTING_SHOW_IN_APP] = show }
+    suspend fun setEdgeLightingShowWake(show: Boolean) = context.dataStore.edit { it[KEY_EDGE_LIGHTING_SHOW_WAKE] = show }
     suspend fun setEdgeLightingIntensity(intensity: Float) = context.dataStore.edit { it[KEY_EDGE_LIGHTING_INTENSITY] = intensity }
+    suspend fun setFloatingCaptionsEnabled(enabled: Boolean) = context.dataStore.edit { it[KEY_FLOATING_CAPTIONS_ENABLED] = enabled }
+    suspend fun setIdleSilenceHangupMinutes(minutes: Int) = context.dataStore.edit { it[KEY_IDLE_SILENCE_HANGUP_MINUTES] = minutes }
+    suspend fun setKeepAliveScreenOff(keepAlive: Boolean) = context.dataStore.edit { it[KEY_KEEP_ALIVE_SCREEN_OFF] = keepAlive }
+    suspend fun setScreenOffTimeoutMinutes(minutes: Int) = context.dataStore.edit { it[KEY_SCREEN_OFF_TIMEOUT_MINUTES] = minutes }
+    suspend fun setPlannerModelName(model: String) = context.dataStore.edit { it[KEY_PLANNER_MODEL_NAME] = model.trim() }
+    suspend fun setPlannerUseScreenshots(use: Boolean) = context.dataStore.edit { it[KEY_PLANNER_USE_SCREENSHOTS] = use }
+    suspend fun setPlannerMaxTimeSeconds(seconds: Int) = context.dataStore.edit { it[KEY_PLANNER_MAX_TIME_SECONDS] = seconds }
     suspend fun setOwnerName(name: String) = context.dataStore.edit { it[KEY_OWNER_NAME] = name }
     suspend fun setExtraInstructions(instructions: String) = context.dataStore.edit { it[KEY_EXTRA_INSTRUCTIONS] = instructions }
     suspend fun setIncludeSystemApps(include: Boolean) = context.dataStore.edit { it[KEY_INCLUDE_SYSTEM_APPS] = include }

@@ -3,8 +3,11 @@ package com.example.service
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.graphics.Path
+import android.graphics.Rect
+import android.os.Bundle
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import com.example.core.agent.ScreenNode
 
 class AuraAccessibilityService : AccessibilityService() {
 
@@ -25,9 +28,7 @@ class AuraAccessibilityService : AccessibilityService() {
         instance = null
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // Handled as needed
-    }
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
 
     override fun onInterrupt() {}
 
@@ -37,6 +38,77 @@ class AuraAccessibilityService : AccessibilityService() {
     fun findNodesByText(text: String): List<AccessibilityNodeInfo> {
         val root = rootInActiveWindow ?: return emptyList()
         return root.findAccessibilityNodeInfosByText(text) ?: emptyList()
+    }
+
+    /**
+     * Traverses in-memory active window hierarchy and extracts compact ScreenNodes (sub-30ms).
+     */
+    fun extractScreenNodes(): List<ScreenNode> {
+        val root = rootInActiveWindow ?: return emptyList()
+        val nodes = mutableListOf<ScreenNode>()
+        var counter = 1
+
+        fun traverse(node: AccessibilityNodeInfo?) {
+            if (node == null) return
+            val rect = Rect()
+            node.getBoundsInScreen(rect)
+
+            val text = node.text?.toString() ?: ""
+            val desc = node.contentDescription?.toString() ?: ""
+            val viewId = node.viewIdResourceName?.substringAfterLast("/") ?: ""
+            val cls = node.className?.toString()?.substringAfterLast(".") ?: ""
+            val pkg = node.packageName?.toString() ?: ""
+
+            val isClickable = node.isClickable
+            val isEditable = node.isEditable
+            val isScrollable = node.isScrollable
+            val isFocusable = node.isFocusable
+
+            // Include interactive or informative nodes, skip 0-size invisible bounds
+            if (rect.width() > 0 && rect.height() > 0) {
+                if (text.isNotBlank() || desc.isNotBlank() || viewId.isNotBlank() || isClickable || isEditable || isScrollable) {
+                    nodes.add(
+                        ScreenNode(
+                            text = text.trim(),
+                            contentDescription = desc.trim(),
+                            resourceId = viewId,
+                            className = cls,
+                            bounds = "[${rect.left},${rect.top}][${rect.right},${rect.bottom}]",
+                            centerX = rect.centerX(),
+                            centerY = rect.centerY(),
+                            isClickable = isClickable,
+                            isFocusable = isFocusable,
+                            index = counter++,
+                            isEditable = isEditable,
+                            isScrollable = isScrollable,
+                            packageName = pkg
+                        )
+                    )
+                }
+            }
+
+            for (i in 0 until node.childCount) {
+                traverse(node.getChild(i))
+            }
+        }
+
+        traverse(root)
+        return nodes
+    }
+
+    /**
+     * Sets text on an editable node directly via accessibility arguments.
+     */
+    fun setTextOnActiveNode(text: String): Boolean {
+        val root = rootInActiveWindow ?: return false
+        val focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+        if (focused != null && focused.isEditable) {
+            val args = Bundle().apply {
+                putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+            }
+            return focused.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+        }
+        return false
     }
 
     /**

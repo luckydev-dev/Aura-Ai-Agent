@@ -27,6 +27,7 @@ object GeminiLiveHandshake {
         resumptionHandle: String = "",
         toolDeclarationsJson: List<Map<String, Any>> = emptyList(),
         thinkingLevel: String = "LOW",
+        language: String = "Hinglish",
         interruptionSensitivity: String = "Low",
         allowInterrupting: Boolean = true,
         unsupportedFields: Set<String> = emptySet()
@@ -256,6 +257,17 @@ object GeminiLiveHandshake {
             "Auth Hint: Your key begins with 'AIza...'. Verify that the Generative Language API is enabled and has quota."
         } else {
             "Auth Hint: Check that a valid Gemini API key is configured in Settings."
+        }
+    }
+
+    fun extractOffendingFieldFrom1007(reason: String): String? {
+        val lower = reason.lowercase()
+        return when {
+            lower.contains("languagecode") -> "speechConfig_languageCode"
+            lower.contains("realtime_input_config") || lower.contains("realtimeinputconfig") -> "realtimeInputConfig"
+            lower.contains("inputaudiotranscription") || lower.contains("languagecodes") -> "inputAudioTranscription_languageCodes"
+            lower.contains("tools") || lower.contains("functiondeclaration") -> "tools"
+            else -> null
         }
     }
 

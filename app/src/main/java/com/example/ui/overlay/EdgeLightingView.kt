@@ -5,9 +5,11 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.*
 import android.os.Build
+import android.provider.Settings
+import android.util.Log
 import android.view.View
 import android.view.animation.LinearInterpolator
-import com.example.core.live.CaptionState
+import kotlin.math.*
 
 enum class EdgeLightingState {
     HIDDEN,
@@ -28,10 +30,10 @@ class EdgeLightingView(context: Context) : View(context) {
     private var micAmplitude = 0f
     private var speakerAmplitude = 0f
 
-    var strokeThicknessDp: Float = 8f
+    var depthPercent: Int = 22 // 8% to 40%
         set(value) {
-            field = value.coerceIn(4f, 16f)
-            updatePaintStroke()
+            field = value.coerceIn(8, 40)
+            invalidate()
         }
 
     var intensity: Float = 1.0f
@@ -40,76 +42,110 @@ class EdgeLightingView(context: Context) : View(context) {
             invalidate()
         }
 
-    var showCaptions: Boolean = true
-    private var currentCaptionState = CaptionState()
+    var colorTheme: String = "Aura" // "Aura", "Ocean", "Sunset", "Mono"
+        set(value) {
+            field = value
+            invalidate()
+        }
 
     private val density = context.resources.displayMetrics.density
     private var cornerRadiusPx = 40f * density
 
-    private val clipPath = Path()
-    private val borderPath = Path()
-
-    // Paints
-    private val glowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeCap = Paint.Cap.ROUND
-    }
-
-    private val corePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeCap = Paint.Cap.ROUND
-    }
-
-    private val captionBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(220, 18, 18, 26)
-        style = Paint.Style.FILL
-    }
-
-    private val captionBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(80, 255, 255, 255)
-        style = Paint.Style.STROKE
-        strokeWidth = 1f * density
-    }
-
-    private val textPaintYou = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(230, 160, 165, 185)
-        textSize = 13f * density
-        typeface = Typeface.create("sans-serif", Typeface.NORMAL)
-    }
-
-    private val textPaintAura = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(255, 255, 179, 71) // Accent amber
-        textSize = 14f * density
-        typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-    }
-
-    private var flowPhase = 0f
+    // Animation & Breathing
+    private var timeSeconds = 0f
     private var phaseAnimator: ValueAnimator? = null
     private var globalAlpha = 0f
     private var alphaAnimator: ValueAnimator? = null
 
+    // Target and interpolated levels
+    private var targetLevel = 0f
+    private var currentLevel = 0f
+
+    // AGSL RuntimeShader for API 33+
+    private var agslShader: Any? = null // RuntimeShader on API 33+
+    private val shaderPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+
+    // Fallback paints and paths for API 26-32
+    private val fallbackPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+    }
+
+    private val isReduceMotionEnabled: Boolean
+        get() {
+            return try {
+                val scale = Settings.Global.getFloat(
+                    context.contentResolver,
+                    Settings.Global.ANIMATOR_DURATION_SCALE,
+                    1.0f
+                )
+                scale == 0f
+            } catch (e: Exception) {
+                false
+            }
+        }
+
     init {
         setLayerType(LAYER_TYPE_HARDWARE, null)
-        updatePaintStroke()
+        initShaderIfSupported()
         startPhaseAnimation()
     }
 
-    private fun updatePaintStroke() {
-        val strokePx = strokeThicknessDp * density
-        corePaint.strokeWidth = strokePx
-        glowPaint.strokeWidth = strokePx * 2.2f
-        glowPaint.maskFilter = BlurMaskFilter(strokePx * 1.5f, BlurMaskFilter.Blur.NORMAL)
+    private fun initShaderIfSupported() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            try {
+                val shaderCode = """
+                    uniform float2 resolution;
+                    uniform float time;
+                    uniform float depth;
+                    uniform float intensity;
+                    uniform float level;
+                    uniform float cornerRadius;
+                    uniform half4 c1;
+                    uniform half4 c2;
+                    uniform half4 c3;
+
+                    float sdRoundRect(float2 p, float2 hs, float r) {
+                        float2 q = abs(p) - hs + r;
+                        return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+                    }
+
+                    half4 main(float2 fc) {
+                        float2 c = resolution * 0.5;
+                        float2 p = fc - c;
+                        float d = max(-sdRoundRect(p, c, cornerRadius), 0.0);
+                        float reach = depth * (0.7 + 0.9 * level);
+                        if (reach <= 0.0) reach = 1.0;
+                        float f = exp(-d / reach) * smoothstep(reach * 3.0, 0.0, d);
+                        float t = fract(atan(p.y, p.x) / 6.2831853 + time * 0.08);
+                        float k = t * 3.0;
+                        half3 col = k < 1.0 ? mix(c1.rgb, c2.rgb, k) : (k < 2.0 ? mix(c2.rgb, c3.rgb, k - 1.0) : mix(c3.rgb, c1.rgb, k - 2.0));
+                        float a = clamp(f * intensity * (0.88 + 0.12 * sin(time * 2.0 + t * 12.566)), 0.0, 1.0);
+                        return half4(col * a, a);
+                    }
+                """.trimIndent()
+                agslShader = android.graphics.RuntimeShader(shaderCode)
+                shaderPaint.shader = agslShader as android.graphics.Shader
+            } catch (e: Exception) {
+                android.util.Log.e("Aura", "Failed compiling AGSL RuntimeShader: ${e.message}", e)
+                agslShader = null
+            }
+        }
     }
 
     private fun startPhaseAnimation() {
         phaseAnimator?.cancel()
-        phaseAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
-            duration = 3000L
+        phaseAnimator = ValueAnimator.ofFloat(0f, 1000f).apply {
+            duration = 1000_000L // Long running time counter
             repeatCount = ValueAnimator.INFINITE
             interpolator = LinearInterpolator()
             addUpdateListener {
-                flowPhase = it.animatedValue as Float
-                if (lightingState != EdgeLightingState.HIDDEN) {
+                if (!isReduceMotionEnabled) {
+                    timeSeconds += 0.016f // ~60fps step
+                }
+                // Smoothly interpolate currentLevel toward targetLevel
+                currentLevel += (targetLevel - currentLevel) * 0.18f
+
+                if (lightingState != EdgeLightingState.HIDDEN && globalAlpha > 0.01f) {
                     invalidate()
                 }
             }
@@ -122,27 +158,32 @@ class EdgeLightingView(context: Context) : View(context) {
         val wasHidden = lightingState == EdgeLightingState.HIDDEN
         lightingState = state
 
-        if (state == EdgeLightingState.HIDDEN) {
-            animateAlphaTo(0f, 400L)
-        } else {
-            if (wasHidden) {
-                animateAlphaTo(1f, 250L)
+        when (state) {
+            EdgeLightingState.HIDDEN -> {
+                animateAlphaTo(0f, 400L)
             }
-            invalidate()
+            else -> {
+                if (wasHidden) {
+                    animateAlphaTo(1f, 250L)
+                }
+                invalidate()
+            }
         }
     }
 
     fun updateAmplitudes(mic: Float, speaker: Float) {
         micAmplitude = mic
         speakerAmplitude = speaker
-        if (lightingState == EdgeLightingState.LISTENING || lightingState == EdgeLightingState.SPEAKING) {
-            invalidate()
-        }
-    }
 
-    fun updateCaptionState(caption: CaptionState) {
-        currentCaptionState = caption
-        if (showCaptions && lightingState != EdgeLightingState.HIDDEN) {
+        targetLevel = when (lightingState) {
+            EdgeLightingState.LISTENING -> mic.coerceIn(0f, 1f)
+            EdgeLightingState.SPEAKING -> speaker.coerceIn(0f, 1f)
+            EdgeLightingState.ACTING -> 0.7f
+            EdgeLightingState.THINKING -> 0.4f
+            else -> 0.1f
+        }
+
+        if (lightingState == EdgeLightingState.LISTENING || lightingState == EdgeLightingState.SPEAKING) {
             invalidate()
         }
     }
@@ -164,7 +205,6 @@ class EdgeLightingView(context: Context) : View(context) {
         super.onSizeChanged(w, h, oldw, oldh)
         if (w <= 0 || h <= 0) return
 
-        // Rounded corners discovery on Android 12+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val insets = rootWindowInsets
             val corner = insets?.getRoundedCorner(android.view.RoundedCorner.POSITION_TOP_LEFT)
@@ -172,11 +212,6 @@ class EdgeLightingView(context: Context) : View(context) {
                 cornerRadiusPx = corner.radius.toFloat()
             }
         }
-
-        val halfStroke = (strokeThicknessDp * density) / 2f
-        borderPath.reset()
-        val rectF = RectF(halfStroke, halfStroke, w - halfStroke, h - halfStroke)
-        borderPath.addRoundRect(rectF, cornerRadiusPx, cornerRadiusPx, Path.Direction.CW)
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -187,89 +222,148 @@ class EdgeLightingView(context: Context) : View(context) {
         val h = height.toFloat()
         if (w <= 0 || h <= 0) return
 
-        // Select color spectrum based on state
-        val (colors, speedMult) = when (lightingState) {
-            EdgeLightingState.CONNECTING, EdgeLightingState.RECONNECTING -> Pair(
-                intArrayOf(Color.parseColor("#FFB347"), Color.parseColor("#4A90E2"), Color.parseColor("#FFB347")),
-                0.7f
-            )
-            EdgeLightingState.LISTENING -> {
-                val blueViolet = Color.parseColor("#7F5AF0")
-                val cyan = Color.parseColor("#2CB67D")
-                Pair(intArrayOf(blueViolet, cyan, blueViolet), 1.0f + micAmplitude * 2f)
+        val shorterSide = minOf(w, h)
+        val depthPx = shorterSide * (depthPercent / 100f)
+        val dynamicIntensity = (globalAlpha * intensity).coerceIn(0f, 1.5f)
+
+        // Palette selection
+        val (c1, c2, c3) = getPaletteColors()
+
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && agslShader != null) {
+                drawWithAgsl(canvas, w, h, depthPx, dynamicIntensity, c1, c2, c3)
+            } else {
+                drawWithCanvasFallback(canvas, w, h, depthPx, dynamicIntensity, c1, c2, c3)
             }
-            EdgeLightingState.THINKING -> Pair(
-                intArrayOf(Color.parseColor("#2CB67D"), Color.parseColor("#7F5AF0"), Color.parseColor("#FF8E53")),
-                1.8f
-            )
-            EdgeLightingState.SPEAKING -> {
-                val amber = Color.parseColor("#FFB347")
-                val coral = Color.parseColor("#FF6B6B")
-                Pair(intArrayOf(amber, coral, amber), 1.2f + speakerAmplitude * 2f)
-            }
-            EdgeLightingState.ACTING -> Pair(
-                intArrayOf(Color.parseColor("#FFD166"), Color.parseColor("#EF476F"), Color.parseColor("#06D6A0")),
-                2.5f
-            )
-            EdgeLightingState.ERROR -> Pair(
-                intArrayOf(Color.parseColor("#FF3B30"), Color.parseColor("#D90429"), Color.parseColor("#FF3B30")),
-                0.5f
-            )
-            EdgeLightingState.MUTED -> Pair(
-                intArrayOf(Color.parseColor("#E0A96D"), Color.parseColor("#776B5D"), Color.parseColor("#E0A96D")),
-                0.5f
-            )
-            else -> Pair(
-                intArrayOf(Color.parseColor("#FFB347"), Color.parseColor("#FF6B6B"), Color.parseColor("#7F5AF0")),
-                1.0f
-            )
-        }
-
-        val dynamicAlpha = ((globalAlpha * intensity).coerceIn(0.2f, 1f) * 255).toInt()
-        val sweepGradient = SweepGradient(w / 2f, h / 2f, colors, null)
-        val matrix = Matrix()
-        matrix.postRotate((flowPhase * 360f * speedMult) % 360f, w / 2f, h / 2f)
-        sweepGradient.setLocalMatrix(matrix)
-
-        glowPaint.shader = sweepGradient
-        glowPaint.alpha = (dynamicAlpha * 0.65f).toInt()
-        canvas.drawPath(borderPath, glowPaint)
-
-        corePaint.shader = sweepGradient
-        corePaint.alpha = dynamicAlpha
-        canvas.drawPath(borderPath, corePaint)
-
-        // Draw Caption Pill at bottom if enabled and text exists
-        if (showCaptions && (currentCaptionState.auraText.isNotBlank() || currentCaptionState.userText.isNotBlank())) {
-            drawBottomCaptionPill(canvas, w, h)
+        } catch (t: Throwable) {
+            Log.e("Aura", "Error in EdgeLightingView onDraw: ${t.message}", t)
         }
     }
 
-    private fun drawBottomCaptionPill(canvas: Canvas, w: Float, h: Float) {
-        val pillMargin = 24f * density
-        val pillMaxW = (w - (pillMargin * 2)).coerceAtMost(340f * density)
-        val pillLeft = (w - pillMaxW) / 2f
-        val pillBottom = h - (48f * density)
-        val pillHeight = 56f * density
-        val pillTop = pillBottom - pillHeight
-        val pillRect = RectF(pillLeft, pillTop, pillLeft + pillMaxW, pillBottom)
-
-        canvas.drawRoundRect(pillRect, 16f * density, 16f * density, captionBgPaint)
-        canvas.drawRoundRect(pillRect, 16f * density, 16f * density, captionBorderPaint)
-
-        val textPadX = pillLeft + (14f * density)
-        var textY = pillTop + (20f * density)
-
-        if (currentCaptionState.userText.isNotBlank()) {
-            val userDisplay = "You: " + currentCaptionState.userText.take(45)
-            canvas.drawText(userDisplay, textPadX, textY, textPaintYou)
-            textY += 18f * density
+    private fun getPaletteColors(): Triple<Color, Color, Color> {
+        return when (lightingState) {
+            EdgeLightingState.CONNECTING, EdgeLightingState.RECONNECTING -> Triple(
+                Color.valueOf(1.0f, 0.70f, 0.28f, 1.0f), // Amber
+                Color.valueOf(0.29f, 0.56f, 0.89f, 1.0f), // Blue
+                Color.valueOf(1.0f, 0.70f, 0.28f, 1.0f)
+            )
+            EdgeLightingState.LISTENING -> when (colorTheme) {
+                "Ocean" -> Triple(
+                    Color.valueOf(0.0f, 0.75f, 1.0f, 1.0f),
+                    Color.valueOf(0.17f, 0.71f, 0.49f, 1.0f),
+                    Color.valueOf(0.12f, 0.53f, 0.90f, 1.0f)
+                )
+                "Sunset" -> Triple(
+                    Color.valueOf(1.0f, 0.42f, 0.42f, 1.0f),
+                    Color.valueOf(1.0f, 0.70f, 0.28f, 1.0f),
+                    Color.valueOf(0.85f, 0.25f, 0.45f, 1.0f)
+                )
+                "Mono" -> Triple(
+                    Color.valueOf(0.85f, 0.88f, 0.92f, 1.0f),
+                    Color.valueOf(0.60f, 0.65f, 0.72f, 1.0f),
+                    Color.valueOf(0.85f, 0.88f, 0.92f, 1.0f)
+                )
+                else -> Triple( // "Aura" default
+                    Color.valueOf(0.50f, 0.35f, 0.94f, 1.0f), // Violet
+                    Color.valueOf(0.17f, 0.71f, 0.49f, 1.0f), // Cyan
+                    Color.valueOf(0.50f, 0.35f, 0.94f, 1.0f)
+                )
+            }
+            EdgeLightingState.THINKING -> Triple(
+                Color.valueOf(0.17f, 0.71f, 0.49f, 1.0f), // Emerald
+                Color.valueOf(0.50f, 0.35f, 0.94f, 1.0f), // Violet
+                Color.valueOf(1.0f, 0.56f, 0.33f, 1.0f)  // Coral
+            )
+            EdgeLightingState.SPEAKING -> Triple(
+                Color.valueOf(1.0f, 0.70f, 0.28f, 1.0f), // Warm amber
+                Color.valueOf(1.0f, 0.42f, 0.42f, 1.0f), // Coral
+                Color.valueOf(1.0f, 0.70f, 0.28f, 1.0f)
+            )
+            EdgeLightingState.ACTING -> Triple(
+                Color.valueOf(1.0f, 0.82f, 0.40f, 1.0f), // Gold
+                Color.valueOf(0.94f, 0.28f, 0.44f, 1.0f), // Pink
+                Color.valueOf(0.02f, 0.84f, 0.63f, 1.0f)  // Cyan
+            )
+            EdgeLightingState.ERROR -> Triple(
+                Color.valueOf(1.0f, 0.23f, 0.19f, 1.0f), // Crimson
+                Color.valueOf(0.85f, 0.02f, 0.16f, 1.0f),
+                Color.valueOf(1.0f, 0.23f, 0.19f, 1.0f)
+            )
+            EdgeLightingState.MUTED -> Triple(
+                Color.valueOf(0.88f, 0.66f, 0.43f, 0.6f),
+                Color.valueOf(0.47f, 0.42f, 0.36f, 0.6f),
+                Color.valueOf(0.88f, 0.66f, 0.43f, 0.6f)
+            )
+            else -> Triple(
+                Color.valueOf(1.0f, 0.70f, 0.28f, 1.0f),
+                Color.valueOf(1.0f, 0.42f, 0.42f, 1.0f),
+                Color.valueOf(0.50f, 0.35f, 0.94f, 1.0f)
+            )
         }
+    }
 
-        if (currentCaptionState.auraText.isNotBlank()) {
-            val auraDisplay = "Aura: " + currentCaptionState.auraText.take(45)
-            canvas.drawText(auraDisplay, textPadX, textY, textPaintAura)
+    private fun drawWithAgsl(
+        canvas: Canvas,
+        w: Float,
+        h: Float,
+        depthPx: Float,
+        dynamicIntensity: Float,
+        c1: Color,
+        c2: Color,
+        c3: Color
+    ) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            try {
+                val shader = agslShader as? android.graphics.RuntimeShader ?: return
+                shader.setFloatUniform("resolution", w, h)
+                shader.setFloatUniform("time", timeSeconds)
+                shader.setFloatUniform("depth", depthPx)
+                shader.setFloatUniform("intensity", dynamicIntensity)
+                shader.setFloatUniform("level", currentLevel)
+                shader.setFloatUniform("cornerRadius", cornerRadiusPx)
+
+                shader.setColorUniform("c1", c1.toArgb())
+                shader.setColorUniform("c2", c2.toArgb())
+                shader.setColorUniform("c3", c3.toArgb())
+
+                canvas.drawRect(0f, 0f, w, h, shaderPaint)
+            } catch (t: Throwable) {
+                // If shader execution or GPU driver fails, gracefully fall back to Canvas drawing
+                drawWithCanvasFallback(canvas, w, h, depthPx, dynamicIntensity, c1, c2, c3)
+            }
         }
+    }
+
+    private fun drawWithCanvasFallback(
+        canvas: Canvas,
+        w: Float,
+        h: Float,
+        depthPx: Float,
+        dynamicIntensity: Float,
+        c1: Color,
+        c2: Color,
+        c3: Color
+    ) {
+        // High quality fallback on API 26-32 using 4 directional edge gradient strips
+        val alphaEdge = (dynamicIntensity.coerceIn(0f, 1f) * 230).toInt()
+        val c1Int = Color.argb(alphaEdge, (c1.red() * 255).toInt(), (c1.green() * 255).toInt(), (c1.blue() * 255).toInt())
+        val transparent = Color.TRANSPARENT
+
+        // Top strip
+        fallbackPaint.shader = LinearGradient(0f, 0f, 0f, depthPx, c1Int, transparent, Shader.TileMode.CLAMP)
+        canvas.drawRect(0f, 0f, w, depthPx, fallbackPaint)
+
+        // Bottom strip
+        fallbackPaint.shader = LinearGradient(0f, h, 0f, h - depthPx, c1Int, transparent, Shader.TileMode.CLAMP)
+        canvas.drawRect(0f, h - depthPx, w, h, fallbackPaint)
+
+        // Left strip
+        fallbackPaint.shader = LinearGradient(0f, 0f, depthPx, 0f, c1Int, transparent, Shader.TileMode.CLAMP)
+        canvas.drawRect(0f, 0f, depthPx, h, fallbackPaint)
+
+        // Right strip
+        fallbackPaint.shader = LinearGradient(w, 0f, w - depthPx, 0f, c1Int, transparent, Shader.TileMode.CLAMP)
+        canvas.drawRect(w - depthPx, 0f, w, h, fallbackPaint)
     }
 
     fun release() {

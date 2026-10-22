@@ -10,7 +10,9 @@ data class CaptionState(
     val turnId: Long = 0L,
     val auraSpeaking: Boolean = false,
     val isInterrupted: Boolean = false
-)
+) {
+    val isAuraSpeaking: Boolean get() = auraSpeaking
+}
 
 enum class TurnSource {
     IDLE, USER, AURA
@@ -136,4 +138,7 @@ class CaptionStateMachine {
         interruptedInCurrentTurn = false
         _state.value = CaptionState()
     }
+
+    fun onInputTranscriptionChunk(chunk: String) = onInputTranscription(chunk)
+    fun onOutputTranscriptionChunk(chunk: String) = onOutputTranscription(chunk)
 }

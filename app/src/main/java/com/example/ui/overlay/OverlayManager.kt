@@ -75,9 +75,9 @@ class OverlayManager(private val context: Context) {
                 AuraTheme {
                     val service = AuraForegroundService.currentService
                     val isCallActive by AuraForegroundService.isCallActive.collectAsState()
-                    val micAmp = service?.audioStreamer?.micAmplitude?.collectAsState()?.value ?: 0f
-                    val speakerAmp = service?.audioPlayer?.speakerAmplitude?.collectAsState()?.value ?: 0f
-                    val isActing = service?.liveClient?.isAuraActing?.collectAsState()?.value ?: false
+                    val micAmp = runCatching { service?.audioStreamer?.micAmplitude?.collectAsState()?.value }.getOrNull() ?: 0f
+                    val speakerAmp = runCatching { service?.audioPlayer?.speakerAmplitude?.collectAsState()?.value }.getOrNull() ?: 0f
+                    val isActing = runCatching { service?.liveClient?.isAuraActing?.collectAsState()?.value }.getOrNull() ?: false
                     val caption by currentCaptionText.collectAsState()
 
                     val state = when {

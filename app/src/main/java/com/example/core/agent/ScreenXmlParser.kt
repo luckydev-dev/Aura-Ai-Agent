@@ -13,7 +13,11 @@ data class ScreenNode(
     val centerX: Int,
     val centerY: Int,
     val isClickable: Boolean,
-    val isFocusable: Boolean
+    val isFocusable: Boolean,
+    val index: Int = 0,
+    val isEditable: Boolean = false,
+    val isScrollable: Boolean = false,
+    val packageName: String = ""
 )
 
 object ScreenXmlParser {

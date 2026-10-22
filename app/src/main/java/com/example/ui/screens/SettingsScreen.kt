@@ -88,8 +88,18 @@ fun SettingsScreen(
 
     val edgeLightingEnabled by preferences.edgeLightingEnabled.collectAsState(initial = true)
     val edgeLightingThickness by preferences.edgeLightingThickness.collectAsState(initial = 8)
+    val edgeLightingDepth by preferences.edgeLightingDepthPercent.collectAsState(initial = 22)
+    val edgeLightingTheme by preferences.edgeLightingTheme.collectAsState(initial = "Aura")
+    val edgeLightingShowInApp by preferences.edgeLightingShowInApp.collectAsState(initial = true)
     val edgeLightingIntensity by preferences.edgeLightingIntensity.collectAsState(initial = 1.0f)
+    val floatingCaptionsEnabled by preferences.floatingCaptionsEnabled.collectAsState(initial = true)
     val overlayEnabled by preferences.overlayEnabled.collectAsState(initial = false)
+
+    val idleSilenceMinutes by preferences.idleSilenceMinutes.collectAsState(initial = 5)
+    val keepAliveScreenOff by preferences.keepAliveScreenOff.collectAsState(initial = false)
+    val screenOffTimeoutMinutes by preferences.screenOffTimeoutMinutes.collectAsState(initial = 3)
+    val plannerModelName by preferences.plannerModelName.collectAsState(initial = "gemini-2.5-flash")
+    val plannerUseScreenshots by preferences.plannerUseScreenshots.collectAsState(initial = true)
 
     val ownerName by preferences.ownerName.collectAsState(initial = AuraPreferences.DEFAULT_OWNER_NAME)
     val extraInstructions by preferences.extraInstructions.collectAsState(initial = "")
@@ -472,7 +482,7 @@ fun SettingsScreen(
                     }
                 }
 
-                // 5. Edge Lighting & Overlay Controls
+                // 5. Edge Lighting & Floating Overlays Controls
                 item {
                     AuraCard(modifier = Modifier.fillMaxWidth()) {
                         androidx.compose.foundation.text.BasicText(
@@ -481,35 +491,69 @@ fun SettingsScreen(
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         androidx.compose.foundation.text.BasicText(
-                            text = "Pulsing screen perimeter glow indicates Aura's state (listening, thinking, speaking) over any app.",
+                            text = "Soft perimeter glow fades smoothly toward center (AGSL on Android 13+, multi-stop gradient on 8.0-12).",
                             style = typography.bodySmall.copy(color = colors.textSecondary)
                         )
                         Spacer(modifier = Modifier.height(12.dp))
 
                         AuraToggleRow(
                             title = "Edge Lighting Overlay",
-                            subtitle = "Full-screen border glow with caption pill.",
+                            subtitle = "Perimeter gradient glow reflecting live Aura state.",
                             checked = edgeLightingEnabled,
                             onCheckedChange = { scope.launch { preferences.setEdgeLightingEnabled(it) } },
                             testTag = "toggle_edge_lighting"
                         )
 
-                        Spacer(modifier = Modifier.height(12.dp))
+                        Spacer(modifier = Modifier.height(10.dp))
                         androidx.compose.foundation.text.BasicText(
-                            text = "Border Thickness",
+                            text = "Glow Depth (Inward Spread)",
                             style = typography.labelLarge.copy(color = colors.textPrimary)
                         )
                         Spacer(modifier = Modifier.height(6.dp))
                         LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            val thicknesses = listOf(4 to "4dp", 8 to "8dp (Default)", 12 to "12dp", 16 to "16dp")
-                            items(thicknesses) { (dpVal, lbl) ->
+                            val depths = listOf(8 to "8%", 15 to "15%", 22 to "22% (Default)", 30 to "30%", 40 to "40%")
+                            items(depths) { (dVal, lbl) ->
                                 AuraChip(
                                     text = lbl,
-                                    selected = edgeLightingThickness == dpVal,
-                                    onClick = { scope.launch { preferences.setEdgeLightingThickness(dpVal) } }
+                                    selected = edgeLightingDepth == dVal,
+                                    onClick = { scope.launch { preferences.setEdgeLightingDepthPercent(dVal) } }
                                 )
                             }
                         }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+                        androidx.compose.foundation.text.BasicText(
+                            text = "Color Theme",
+                            style = typography.labelLarge.copy(color = colors.textPrimary)
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            val themes = listOf("Aura", "Cyberpunk", "Sunset", "Emerald")
+                            items(themes) { t ->
+                                AuraChip(
+                                    text = t,
+                                    selected = edgeLightingTheme.equals(t, ignoreCase = true),
+                                    onClick = { scope.launch { preferences.setEdgeLightingTheme(t) } }
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(12.dp))
+                        AuraToggleRow(
+                            title = "Show Edge Glow Inside Aura App",
+                            subtitle = "When disabled, edge glow only appears over external apps.",
+                            checked = edgeLightingShowInApp,
+                            onCheckedChange = { scope.launch { preferences.setEdgeLightingShowInApp(it) } }
+                        )
+
+                        Spacer(modifier = Modifier.height(12.dp))
+                        AuraToggleRow(
+                            title = "Floating Live Captions",
+                            subtitle = "Compact auto-expanding live transcription pill over external apps.",
+                            checked = floatingCaptionsEnabled,
+                            onCheckedChange = { scope.launch { preferences.setFloatingCaptionsEnabled(it) } },
+                            testTag = "toggle_floating_captions"
+                        )
 
                         Spacer(modifier = Modifier.height(12.dp))
                         AuraToggleRow(
@@ -518,6 +562,94 @@ fun SettingsScreen(
                             checked = overlayEnabled,
                             onCheckedChange = { scope.launch { preferences.setOverlayEnabled(it) } },
                             testTag = "toggle_mini_orb"
+                        )
+                    }
+                }
+
+                // 5b. Session Timeouts & Autonomous Agent Planner
+                item {
+                    AuraCard(modifier = Modifier.fillMaxWidth()) {
+                        androidx.compose.foundation.text.BasicText(
+                            text = "Timeouts & Autonomous Agent",
+                            style = typography.titleMedium.copy(color = colors.textPrimary)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        androidx.compose.foundation.text.BasicText(
+                            text = "Control session watchdog countdowns and autonomous phone automation planning.",
+                            style = typography.bodySmall.copy(color = colors.textSecondary)
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        androidx.compose.foundation.text.BasicText(
+                            text = "Idle Silence Hangup",
+                            style = typography.labelLarge.copy(color = colors.textPrimary)
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            val silenceOptions = listOf(2 to "2 min", 5 to "5 min (Default)", 10 to "10 min", 15 to "15 min")
+                            items(silenceOptions) { (minVal, lbl) ->
+                                AuraChip(
+                                    text = lbl,
+                                    selected = idleSilenceMinutes == minVal,
+                                    onClick = { scope.launch { preferences.setIdleSilenceHangupMinutes(minVal) } }
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(12.dp))
+                        AuraToggleRow(
+                            title = "Keep Call Alive When Screen Turns Off",
+                            subtitle = "If disabled, countdown starts when phone screen turns off.",
+                            checked = keepAliveScreenOff,
+                            onCheckedChange = { scope.launch { preferences.setKeepAliveScreenOff(it) } }
+                        )
+
+                        if (!keepAliveScreenOff) {
+                            Spacer(modifier = Modifier.height(10.dp))
+                            androidx.compose.foundation.text.BasicText(
+                                text = "Screen-Off Disconnect Countdown",
+                                style = typography.labelLarge.copy(color = colors.textPrimary)
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                val screenOffOptions = listOf(1 to "1 min", 3 to "3 min (Default)", 5 to "5 min", 10 to "10 min")
+                                items(screenOffOptions) { (minVal, lbl) ->
+                                    AuraChip(
+                                        text = lbl,
+                                        selected = screenOffTimeoutMinutes == minVal,
+                                        onClick = { scope.launch { preferences.setScreenOffTimeoutMinutes(minVal) } }
+                                    )
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(14.dp))
+                        androidx.compose.foundation.text.BasicText(
+                            text = "Autonomous Agent Planner Model",
+                            style = typography.labelLarge.copy(color = colors.textPrimary)
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            val plannerModels = listOf(
+                                "gemini-2.5-flash" to "2.5 Flash (Fast)",
+                                "gemini-2.5-pro" to "2.5 Pro (Deep)",
+                                "gemini-3.8-flash" to "3.8 Flash"
+                            )
+                            items(plannerModels) { (mId, mLbl) ->
+                                AuraChip(
+                                    text = mLbl,
+                                    selected = plannerModelName.contains(mId, ignoreCase = true),
+                                    onClick = { scope.launch { preferences.setPlannerModelName(mId) } }
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(12.dp))
+                        AuraToggleRow(
+                            title = "Planner Vision (Downscaled Screenshots)",
+                            subtitle = "Sends compressed 768px JPEG screenshot alongside accessibility hierarchy.",
+                            checked = plannerUseScreenshots,
+                            onCheckedChange = { scope.launch { preferences.setPlannerUseScreenshots(it) } }
                         )
                     }
                 }
@@ -1049,17 +1181,35 @@ fun SettingsScreen(
 
                     Spacer(modifier = Modifier.height(12.dp))
 
-                    AuraButton(
-                        text = "Copy Diagnostics to Clipboard",
-                        onClick = {
-                            val fullText = diagnostics.getFullLogText()
-                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                            clipboard.setPrimaryClip(ClipData.newPlainText("Aura Diagnostics", fullText))
-                            Toast.makeText(context, "Diagnostics copied to clipboard", Toast.LENGTH_SHORT).show()
-                        },
+                    Row(
                         modifier = Modifier.fillMaxWidth(),
-                        testTag = "copy_diagnostics_btn"
-                    )
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        AuraButton(
+                            text = "Copy Diagnostics",
+                            onClick = {
+                                val fullText = diagnostics.getFullLogText()
+                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                clipboard.setPrimaryClip(ClipData.newPlainText("Aura Diagnostics", fullText))
+                                Toast.makeText(context, "Diagnostics copied to clipboard", Toast.LENGTH_SHORT).show()
+                            },
+                            modifier = Modifier.weight(1f),
+                            testTag = "copy_diagnostics_btn"
+                        )
+                        AuraButton(
+                            text = "Copy Crash Logs",
+                            onClick = {
+                                val crashFile = java.io.File(context.filesDir, "crash_logs.txt")
+                                val text = if (crashFile.exists()) crashFile.readText() else "No crash logs recorded."
+                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                clipboard.setPrimaryClip(ClipData.newPlainText("Aura Crash Logs", text))
+                                Toast.makeText(context, "Crash logs copied (${if (crashFile.exists()) "Found" else "Empty"})", Toast.LENGTH_SHORT).show()
+                            },
+                            modifier = Modifier.weight(1f),
+                            isPrimary = false,
+                            testTag = "copy_crash_logs_btn"
+                        )
+                    }
                 }
             }
         }

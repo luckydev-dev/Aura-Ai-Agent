@@ -43,8 +43,21 @@ class MainActivity : ComponentActivity() {
         rootManager = RootManager(this)
 
         val autoStartCall = intent?.getBooleanExtra("action_auto_start_call", false) ?: false
-        if (autoStartCall) {
+        val sharedText = if (intent?.action == android.content.Intent.ACTION_SEND) {
+            intent?.getStringExtra(android.content.Intent.EXTRA_TEXT)
+                ?: intent?.clipData?.getItemAt(0)?.text?.toString()
+        } else null
+
+        if (autoStartCall || sharedText != null) {
             AuraForegroundService.startCall(this)
+            if (sharedText != null) {
+                lifecycleScope.launch {
+                    kotlinx.coroutines.delay(1200L)
+                    AuraForegroundService.currentService?.liveClient?.sendTextMessage(
+                        "User shared this text with Aura: \"$sharedText\". Please acknowledge and ask how to help with it."
+                    )
+                }
+            }
         }
 
         setContent {

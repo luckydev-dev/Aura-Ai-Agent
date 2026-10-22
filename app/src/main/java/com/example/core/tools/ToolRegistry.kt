@@ -3,6 +3,7 @@ package com.example.core.tools
 import android.content.Context
 import android.util.Log
 import com.example.core.agent.AgentLoop
+import com.example.core.agent.AgentPlanner
 import com.example.core.memory.MemoryRepository
 import com.example.core.root.PermissionDoctor
 import com.example.core.root.RootManager
@@ -43,13 +44,25 @@ class ToolRegistry(
     private val _actionFeed = MutableSharedFlow<ActionFeedItem>(extraBufferCapacity = 64)
     val actionFeed: SharedFlow<ActionFeedItem> = _actionFeed.asSharedFlow()
 
+    val agentPlanner = AgentPlanner(context, rootManager, appInventory)
+    val screenTools = ScreenAutomationTools(
+        context = context,
+        rootManager = rootManager,
+        agentPlanner = agentPlanner,
+        memoryRepository = memoryRepository,
+        preferences = preferences,
+        appInventory = appInventory
+    )
+
     init {
         val appTools = AppTools(context, rootManager, appInventory)
         val commTools = CommTools(context, rootManager, preferences)
         val deviceTools = DeviceTools(context, rootManager)
-        val screenTools = ScreenAutomationTools(context, rootManager, agentLoop)
         val mediaTools = MediaUtilityTools(context, rootManager)
         val powerTools = PowerTools(rootManager, preferences)
+        val routineTools = RoutineTools(memoryRepository) { name, args ->
+            executeTool(name, args)
+        }
         val voiceControlTools = VoiceAgentControlTools(
             preferences = preferences,
             permissionDoctor = permissionDoctor,
@@ -62,6 +75,7 @@ class ToolRegistry(
                 commTools.getAllTools() +
                 deviceTools.getAllTools() +
                 screenTools.getAllTools() +
+                routineTools.getAllTools() +
                 mediaTools.getAllTools() +
                 powerTools.getAllTools() +
                 voiceControlTools.getAllTools()

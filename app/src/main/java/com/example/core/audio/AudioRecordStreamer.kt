@@ -153,7 +153,7 @@ class AudioRecordStreamer(
             if (AutomaticGainControl.isAvailable()) {
                 gainControl = AutomaticGainControl.create(sessionId)?.apply { enabled = true }
             }
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             Log.w(TAG, "Audio effect attachment notice: ${e.message}")
         }
 

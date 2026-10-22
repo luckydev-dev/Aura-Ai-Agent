@@ -78,7 +78,7 @@ class AudioTrackPlayer(private val context: Context) {
             audioTrack?.play()
             isPlaying = true
             diagnostics?.setAudioTrackState("Playing (24kHz Mono)")
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             Log.e(TAG, "AudioTrack init failed", e)
             isPlaying = false
             diagnostics?.setAudioTrackState("Init Failed: ${e.message}")

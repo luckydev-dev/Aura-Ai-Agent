@@ -314,6 +314,32 @@ class AppInventory(
         return cost[lhsLength]
     }
 
+    suspend fun openApp(nameOrPkg: String): Boolean {
+        val trimmed = nameOrPkg.trim()
+        if (trimmed.isEmpty()) return false
+        val pm = context.packageManager
+        val directIntent = pm.getLaunchIntentForPackage(trimmed)
+        if (directIntent != null) {
+            directIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(directIntent)
+            return true
+        }
+
+        val match = findApp(trimmed)
+        if (match is AppMatchResult.Found) {
+            val launchIntent = pm.getLaunchIntentForPackage(match.app.packageName)
+            if (launchIntent != null) {
+                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(launchIntent)
+                return true
+            }
+        }
+
+        val targetPkg = if (match is AppMatchResult.Found) match.app.packageName else trimmed
+        val res = rootManager.execute("monkey -p $targetPkg -c android.intent.category.LAUNCHER 1")
+        return res.success
+    }
+
     fun destroy() {
         packageReceiver?.let {
             try {

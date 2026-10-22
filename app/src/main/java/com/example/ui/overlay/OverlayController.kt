@@ -3,19 +3,21 @@ package com.example.ui.overlay
 import android.content.Context
 import android.provider.Settings
 import android.util.Log
-import com.example.AuraApplication
+import com.example.core.lifecycle.AppForegroundState
 import com.example.core.live.CaptionState
 import com.example.core.live.LiveConnectionState
 import com.example.core.settings.AuraPreferences
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 
 class OverlayController(
     private val context: Context,
     private val preferences: AuraPreferences,
     private val overlayManager: OverlayManager,
-    private val edgeLightingOverlay: EdgeLightingOverlay
+    private val edgeLightingOverlay: EdgeLightingOverlay,
+    private val floatingCaptionOverlay: FloatingCaptionOverlay = FloatingCaptionOverlay(context)
 ) {
     companion object {
         private const val TAG = "Aura"
@@ -23,11 +25,25 @@ class OverlayController(
 
     private val controllerScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
+    // Cached states
+    private var isCallActive = false
+    private var connectionState: LiveConnectionState = LiveConnectionState.Disconnected
+    private var isAuraActing = false
+    private var isAuraThinking = false
+    private var isMuted = false
+    private var speakerAmp = 0f
+    private var latestCaption = CaptionState()
+
     fun startObserving() {
-        // 1. Edge Lighting Settings
+        // Collect edge lighting settings
         controllerScope.launch {
-            preferences.edgeLightingThickness.collectLatest { th ->
-                edgeLightingOverlay.setThickness(th.toFloat())
+            preferences.edgeLightingDepthPercent.collectLatest { depth ->
+                edgeLightingOverlay.setDepthPercent(depth)
+            }
+        }
+        controllerScope.launch {
+            preferences.edgeLightingTheme.collectLatest { theme ->
+                edgeLightingOverlay.setColorTheme(theme)
             }
         }
         controllerScope.launch {
@@ -35,20 +51,34 @@ class OverlayController(
                 edgeLightingOverlay.setIntensity(inten)
             }
         }
+
+        // Re-evaluate overlays whenever Foreground State changes!
         controllerScope.launch {
-            preferences.showCaptions.collectLatest { show ->
-                edgeLightingOverlay.setShowCaptions(show)
+            AppForegroundState.isForeground.collectLatest { isForeground ->
+                Log.d(TAG, "AppForegroundState changed: isForeground=$isForeground. Re-evaluating overlays...")
+                reEvaluateOverlays(isForeground)
             }
         }
     }
 
     fun updateAmplitudes(micAmp: Float, speakerAmp: Float) {
+        this.speakerAmp = speakerAmp
         edgeLightingOverlay.updateAmplitudes(micAmp, speakerAmp)
     }
 
     fun updateCaptions(caption: CaptionState) {
-        edgeLightingOverlay.updateCaptionState(caption)
-        overlayManager.updateCaption(caption.auraText.ifBlank { caption.userText })
+        latestCaption = caption
+        val isForeground = AppForegroundState.current
+        if (!isForeground && isCallActive) {
+            controllerScope.launch {
+                val floatingCaptionsOn = preferences.floatingCaptionsEnabled.first()
+                if (floatingCaptionsOn) {
+                    floatingCaptionOverlay.updateCaptions(caption)
+                }
+            }
+        } else {
+            floatingCaptionOverlay.hideImmediate()
+        }
     }
 
     suspend fun updateCallState(
@@ -59,19 +89,49 @@ class OverlayController(
         isMuted: Boolean,
         speakerAmp: Float
     ) {
-        val edgeEnabled = preferences.edgeLightingEnabled.first()
-        val miniOrbEnabled = preferences.overlayEnabled.first()
-        val isAppInForeground = AuraApplication.isAppInForeground
+        this.isCallActive = isCallActive
+        this.connectionState = connectionState
+        this.isAuraActing = isAuraActing
+        this.isAuraThinking = isAuraThinking
+        this.isMuted = isMuted
+        this.speakerAmp = speakerAmp
 
-        // Check/Request overlay permission via root if needed
-        if ((edgeEnabled || miniOrbEnabled) && !Settings.canDrawOverlays(context)) {
+        reEvaluateOverlays(AppForegroundState.current)
+    }
+
+    private suspend fun reEvaluateOverlays(isAppInForeground: Boolean) {
+        val edgeEnabled = preferences.edgeLightingEnabled.first()
+        val showEdgeInApp = preferences.edgeLightingShowInApp.first()
+        val miniOrbEnabled = preferences.overlayEnabled.first()
+        val floatingCaptionsOn = preferences.floatingCaptionsEnabled.first()
+
+        // Auto-grant overlay permission via root if needed
+        if ((edgeEnabled || miniOrbEnabled || floatingCaptionsOn) && !Settings.canDrawOverlays(context)) {
             runCatching {
                 com.topjohnwu.superuser.Shell.cmd("appops set ${context.packageName} SYSTEM_ALERT_WINDOW allow").exec()
             }
         }
 
-        // 1. Manage Edge Lighting
-        if (edgeEnabled && isCallActive) {
+        // 1. Manage Floating Captions & Mini Orb:
+        // STRICT RULE: If inside Aura app, NEVER show floating captions or mini orb!
+        if (isAppInForeground || !isCallActive) {
+            floatingCaptionOverlay.hideImmediate()
+            overlayManager.hideOverlay()
+        } else {
+            // Outside Aura app:
+            if (floatingCaptionsOn && (latestCaption.auraText.isNotBlank() || latestCaption.userText.isNotBlank())) {
+                floatingCaptionOverlay.updateCaptions(latestCaption)
+            }
+            if (miniOrbEnabled) {
+                overlayManager.showOverlay()
+            } else {
+                overlayManager.hideOverlay()
+            }
+        }
+
+        // 2. Manage Edge Lighting
+        val shouldShowEdge = edgeEnabled && isCallActive && (!isAppInForeground || showEdgeInApp)
+        if (shouldShowEdge) {
             val targetState = when {
                 isMuted -> EdgeLightingState.MUTED
                 connectionState is LiveConnectionState.Error -> EdgeLightingState.ERROR
@@ -89,22 +149,17 @@ class OverlayController(
         } else {
             edgeLightingOverlay.setState(EdgeLightingState.HIDDEN)
         }
-
-        // 2. Manage Floating Mini-Orb
-        if (miniOrbEnabled && isCallActive && !isAppInForeground) {
-            overlayManager.showOverlay()
-        } else {
-            overlayManager.hideOverlay()
-        }
     }
 
     fun hideAll() {
         edgeLightingOverlay.hide()
         overlayManager.hideOverlay()
+        floatingCaptionOverlay.hideImmediate()
     }
 
     fun destroy() {
         controllerScope.cancel()
         hideAll()
+        floatingCaptionOverlay.destroy()
     }
 }
