@@ -7,13 +7,15 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.*
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import com.example.core.root.RootManager
 import com.example.core.settings.AuraPreferences
+import com.example.ui.components.CrashReportCard
+import com.example.ui.components.SafeModeBanner
 import com.example.service.AuraForegroundService
 import com.example.ui.screens.*
 import com.example.ui.theme.AuraTheme
@@ -103,6 +105,9 @@ class MainActivity : ComponentActivity() {
                         .fillMaxSize()
                         .background(AuraTheme.colors.background)
                 ) {
+                    val crashReport = AuraApplication.lastCrashReport.value
+                    val isSafeMode = AuraApplication.isSafeMode.value
+
                     when (currentScreen) {
                         ScreenRoute.ONBOARDING -> {
                             OnboardingScreen(
@@ -148,6 +153,32 @@ class MainActivity : ComponentActivity() {
                                 onBack = { navigateBack() },
                                 onNavigateToSetup = { navigateTo(ScreenRoute.SETUP_WIZARD) }
                             )
+                        }
+                    }
+
+                    if (crashReport != null || isSafeMode) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .statusBarsPadding()
+                                .padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            if (isSafeMode) {
+                                SafeModeBanner(
+                                    onResetSafeMode = {
+                                        AuraApplication.instance.disableSafeMode()
+                                    }
+                                )
+                            }
+                            if (crashReport != null) {
+                                CrashReportCard(
+                                    crashTrace = crashReport,
+                                    onDismiss = {
+                                        AuraApplication.instance.dismissLastCrashReport()
+                                    }
+                                )
+                            }
                         }
                     }
                 }

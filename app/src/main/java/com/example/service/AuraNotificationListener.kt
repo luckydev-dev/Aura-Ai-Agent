@@ -7,6 +7,7 @@ import android.os.Bundle
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
+import com.example.core.telephony.CallAnnouncementManager
 import java.util.concurrent.ConcurrentHashMap
 
 data class CachedNotification(
@@ -86,11 +87,37 @@ class AuraNotificationListener : NotificationListenerService() {
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
         sbn ?: return
         cacheSbn(sbn)
+        checkVoipIncomingCall(sbn)
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification?) {
         sbn ?: return
         notificationCache.remove(sbn.key)
+    }
+
+    private fun checkVoipIncomingCall(sbn: StatusBarNotification) {
+        try {
+            val notif = sbn.notification ?: return
+            val extras = notif.extras ?: return
+            val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: ""
+            val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: ""
+            val category = notif.category
+
+            val isCallCategory = category == Notification.CATEGORY_CALL
+            val isCallText = text.contains("incoming", ignoreCase = true) ||
+                    text.contains("calling", ignoreCase = true) ||
+                    title.contains("incoming call", ignoreCase = true)
+
+            if (isCallCategory || isCallText) {
+                val pkg = sbn.packageName ?: ""
+                val appLabel = if (pkg.contains("whatsapp")) "WhatsApp" else if (pkg.contains("telegram")) "Telegram" else pkg
+                val caller = if (title.isNotBlank() && !title.contains("call", ignoreCase = true)) title else text
+
+                CallAnnouncementManager.instance?.onVoipCallDetected(appLabel, caller)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error checking VoIP incoming call notification", e)
+        }
     }
 
     private fun refreshNotifications() {

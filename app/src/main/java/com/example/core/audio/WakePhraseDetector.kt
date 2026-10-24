@@ -10,6 +10,7 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import org.json.JSONArray
 import org.json.JSONObject
 import org.vosk.Model
 import org.vosk.Recognizer
@@ -22,7 +23,6 @@ class WakePhraseDetector(
     companion object {
         private const val TAG = "Aura"
         const val SAMPLE_RATE = 16000
-        const val GRAMMAR_JSON = "[\"hey aura\",\"hi aura\",\"hello aura\",\"ok aura\",\"hey ora\",\"hey aara\",\"aura\",\"[unk]\"]"
     }
 
     private var isListening = false
@@ -40,6 +40,20 @@ class WakePhraseDetector(
     val isDetectorActive: StateFlow<Boolean> = _isDetectorActive.asStateFlow()
 
     var sensitivity: String = "normal" // strict, normal, loose
+    var assistantName: String = "Maya"
+
+    private val ownerVoiceVerifier = OwnerVoiceVerifier(context)
+
+    private fun buildGrammarJson(): String {
+        val name = assistantName.trim().lowercase().ifBlank { "maya" }
+        val phrases = mutableSetOf(
+            "hey $name", "hi $name", "hello $name", "ok $name", name,
+            "[unk]"
+        )
+        val arr = JSONArray()
+        phrases.forEach { arr.put(it) }
+        return arr.toString()
+    }
 
     @SuppressLint("MissingPermission")
     fun startListening(scope: CoroutineScope): Boolean {
@@ -56,7 +70,8 @@ class WakePhraseDetector(
                 voskModel = Model(modelPath)
             }
 
-            val rec = Recognizer(voskModel, SAMPLE_RATE.toFloat(), GRAMMAR_JSON)
+            val grammar = buildGrammarJson()
+            val rec = Recognizer(voskModel, SAMPLE_RATE.toFloat(), grammar)
             recognizer = rec
 
             val bufferSize = maxOf(
@@ -83,7 +98,7 @@ class WakePhraseDetector(
             isListening = true
             _isDetectorActive.value = true
 
-            Log.i(TAG, "WakePhraseDetector listening with Vosk model at $modelPath (sensitivity=$sensitivity)")
+            Log.i(TAG, "WakePhraseDetector listening strictly for '$assistantName' (sensitivity=$sensitivity)")
 
             listeningJob = scope.launch(Dispatchers.IO) {
                 val buffer = ByteArray(4096)
@@ -92,7 +107,7 @@ class WakePhraseDetector(
                     if (read > 0) {
                         val isFinal = rec.acceptWaveForm(buffer, read)
                         val resultJson = if (isFinal) rec.result else rec.partialResult
-                        checkWakePhraseMatch(resultJson)
+                        checkWakePhraseMatch(resultJson, buffer, read)
                     }
                 }
             }
@@ -104,7 +119,7 @@ class WakePhraseDetector(
         }
     }
 
-    private fun checkWakePhraseMatch(jsonStr: String) {
+    private fun checkWakePhraseMatch(jsonStr: String, rawBuffer: ByteArray, readSize: Int) {
         try {
             val json = JSONObject(jsonStr)
             val text = (if (json.has("text")) json.optString("text") else json.optString("partial")).trim().lowercase()
@@ -112,29 +127,42 @@ class WakePhraseDetector(
                 _lastHeardText.value = text
                 Log.d(TAG, "Vosk heard: $text")
 
+                val targetName = assistantName.trim().lowercase().ifBlank { "maya" }
+
                 val matches = when (sensitivity.lowercase()) {
                     "strict" -> {
-                        // Requires exact "hey aura", "hi aura", "hello aura", "ok aura"
-                        text.contains("hey aura") || text.contains("hi aura") ||
-                                text.contains("hello aura") || text.contains("ok aura")
+                        text.contains("hey $targetName") || text.contains("hi $targetName") ||
+                                text.contains("hello $targetName") || text.contains("ok $targetName")
                     }
                     "loose" -> {
-                        // Any occurrence of "aura", "ora", or "aara"
-                        text.contains("aura") || text.contains("ora") || text.contains("aara")
+                        text.contains(targetName)
                     }
-                    else -> { // "normal" (default)
-                        // Trigger on aura/ora/aara with a preceding hey/hi/ok/hello or standalone "hey aura"
-                        (text.contains("aura") || text.contains("ora") || text.contains("aara")) &&
-                                (text.contains("hey") || text.contains("hi") || text.contains("hello") || text.contains("ok"))
+                    else -> { // "normal"
+                        text.contains(targetName) &&
+                                (text.contains("hey") || text.contains("hi") || text.contains("hello") || text.contains("ok") || text == targetName)
                     }
                 }
 
                 if (matches) {
                     val now = System.currentTimeMillis()
-                    if (now - lastTriggerTimestamp > 3000L) { // 3-second debounce
+                    if (now - lastTriggerTimestamp > 3000L) {
+                        // Check owner voice recognition if profile exists
+                        if (ownerVoiceVerifier.hasProfile()) {
+                            val pcmShorts = ShortArray(readSize / 2)
+                            for (i in pcmShorts.indices) {
+                                pcmShorts[i] = ((rawBuffer[i * 2 + 1].toInt() shl 8) or (rawBuffer[i * 2].toInt() and 0xFF)).toShort()
+                            }
+                            val matchResult = ownerVoiceVerifier.verifyOwnerVoice(pcmShorts, pcmShorts.size)
+                            if (!matchResult.isMatch) {
+                                Log.w(TAG, "🚫 Unrecognized voice attempted to wake Maya: ${matchResult.message}")
+                                return
+                            } else {
+                                Log.i(TAG, "✅ Owner voice verified: ${matchResult.message}")
+                            }
+                        }
+
                         lastTriggerTimestamp = now
-                        Log.i(TAG, "🎯 'Hey Aura' wake phrase triggered with text: '$text'")
-                        // CRITICAL: Stop and release AudioRecord completely before invoking callback!
+                        Log.i(TAG, "🎯 Wake phrase triggered for '$targetName': '$text'")
                         stopListening()
                         onWakePhraseDetected()
                     }
@@ -145,10 +173,6 @@ class WakePhraseDetector(
         }
     }
 
-    /**
-     * Completely stops listening and RELEASES AudioRecord and Recognizer,
-     * so that the call pipeline can immediately take over the microphone.
-     */
     fun stopListening() {
         isListening = false
         _isDetectorActive.value = false

@@ -3,6 +3,9 @@ package com.example.core.tools
 import android.content.Context
 import android.hardware.camera2.CameraManager
 import com.example.core.root.RootManager
+import com.example.core.settings.AuraPreferences
+import com.example.service.AuraAccessibilityService
+import kotlinx.coroutines.flow.first
 import java.util.Locale
 
 class DeviceTools(
@@ -388,12 +391,141 @@ class DeviceTools(
         }
     }
 
+    val controlMediaTool = object : Tool {
+        override val name = "control_media"
+        override val description = "Controls media playback (action: 'play_pause', 'next', 'previous', 'stop')."
+        override val parametersSchema = mapOf(
+            "type" to "object",
+            "properties" to mapOf("action" to mapOf("type" to "string", "description" to "'play_pause', 'next', 'previous', or 'stop'.")),
+            "required" to listOf("action")
+        )
+
+        override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
+            val action = args["action"]?.toString()?.lowercase(Locale.ROOT) ?: "play_pause"
+            val keycode = when (action) {
+                "next" -> 87
+                "previous", "prev" -> 88
+                "stop" -> 86
+                else -> 85 // KEYCODE_MEDIA_PLAY_PAUSE
+            }
+            val res = rootManager.execute("input keyevent $keycode")
+            return ToolExecutionResult(res.success, "Media playback $action executed")
+        }
+    }
+
+    val getDeviceTelemetryTool = object : Tool {
+        override val name = "get_device_telemetry"
+        override val description = "Gets detailed device telemetry (battery health, CPU load, RAM free, thermal state)."
+        override val parametersSchema = mapOf("type" to "object", "properties" to emptyMap<String, Any>())
+
+        override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
+            val bat = rootManager.execute("dumpsys battery | grep -E 'level|temperature|status|health'").stdout.trim()
+            val ram = rootManager.execute("free -h || head -n 4 /proc/meminfo").stdout.trim()
+            val uptime = rootManager.execute("uptime").stdout.trim()
+            val report = "=== DEVICE TELEMETRY ===\nUptime: $uptime\n\n--- Battery ---\n$bat\n\n--- Memory ---\n$ram"
+            return ToolExecutionResult(true, report)
+        }
+    }
+
+    val toggleNfcTool = object : Tool {
+        override val name = "toggle_nfc"
+        override val description = "Turns NFC on or off."
+        override val parametersSchema = mapOf(
+            "type" to "object",
+            "properties" to mapOf("on" to mapOf("type" to "boolean", "description" to "true to turn on, false to turn off.")),
+            "required" to listOf("on")
+        )
+
+        override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
+            val on = args["on"] as? Boolean ?: return ToolExecutionResult(false, "Missing 'on' parameter")
+            val cmd = if (on) "svc nfc enable" else "svc nfc disable"
+            val res = rootManager.execute(cmd)
+            return ToolExecutionResult(res.success, if (on) "NFC enabled" else "NFC disabled")
+        }
+    }
+
+    val vibrateDeviceTool = object : Tool {
+        override val name = "vibrate_device"
+        override val description = "Triggers a haptic vibration pulse or alert feedback."
+        override val parametersSchema = mapOf(
+            "type" to "object",
+            "properties" to mapOf("duration_ms" to mapOf("type" to "integer", "description" to "Vibration duration in milliseconds (default 500)."))
+        )
+
+        override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
+            val ms = (args["duration_ms"] as? Number)?.toLong() ?: 500L
+            return try {
+                val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as? android.os.Vibrator
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                    vibrator?.vibrate(android.os.VibrationEffect.createOneShot(ms, android.os.VibrationEffect.DEFAULT_AMPLITUDE))
+                } else {
+                    @Suppress("DEPRECATION")
+                    vibrator?.vibrate(ms)
+                }
+                ToolExecutionResult(true, "Vibrated device for $ms ms")
+            } catch (e: Exception) {
+                ToolExecutionResult(false, "Vibration failed: ${e.message}")
+            }
+        }
+    }
+
+    val unlockPhoneTool = object : Tool {
+        override val name = "unlock_phone"
+        override val description = "Wakes up and unlocks the phone screen using owner's configured credentials (pattern, PIN, or password) via accessibility service automation."
+        override val parametersSchema = mapOf("type" to "object", "properties" to emptyMap<String, Any>())
+
+        override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
+            val a11y = AuraAccessibilityService.instance
+            if (a11y == null) {
+                return ToolExecutionResult(false, "Accessibility Service is not enabled. Please enable it in Settings > Permissions.")
+            }
+            val prefs = AuraPreferences(context)
+            val lockType = prefs.screenLockType.first()
+            val patternPts = prefs.savedPatternPoints.first()
+            val pin = prefs.savedLockPin.first()
+            val pass = prefs.savedLockPassword.first()
+
+            return kotlinx.coroutines.suspendCancellableCoroutine { continuation ->
+                a11y.executeAutoUnlock(lockType, patternPts, pin, pass) { success ->
+                    if (continuation.isActive) {
+                        continuation.resumeWith(
+                            Result.success(
+                                ToolExecutionResult(
+                                    success,
+                                    if (success) "Phone screen unlocked successfully" else "Failed to unlock phone screen"
+                                )
+                            )
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    val lockPhoneTool = object : Tool {
+        override val name = "lock_phone"
+        override val description = "Immediately locks the phone screen."
+        override val parametersSchema = mapOf("type" to "object", "properties" to emptyMap<String, Any>())
+
+        override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
+            val a11y = AuraAccessibilityService.instance
+            val locked = a11y?.lockDevice() ?: false
+            return if (locked) {
+                ToolExecutionResult(true, "Phone screen locked successfully")
+            } else {
+                val res = rootManager.execute("input keyevent 26")
+                ToolExecutionResult(res.success, if (res.success) "Screen turned off" else "Could not lock screen: Accessibility service inactive")
+            }
+        }
+    }
+
     fun getAllTools(): List<Tool> = listOf(
         setWifiTool, setBluetoothTool, setMobileDataTool, setAirplaneModeTool,
         setFlashlightTool, setHotspotTool, setLocationTool, setDoNotDisturbTool,
         setAutoRotateTool, setDarkModeTool, setBrightnessTool, setVolumeTool,
         setRingerModeTool, getBatteryTool, getStorageTool, getRamTool,
         getNetworkInfoTool, getDeviceInfoTool, takeScreenshotTool, recordScreenTool,
-        rebootTool, shutdownTool
+        rebootTool, shutdownTool, controlMediaTool, getDeviceTelemetryTool,
+        toggleNfcTool, vibrateDeviceTool, unlockPhoneTool, lockPhoneTool
     )
 }

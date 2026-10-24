@@ -39,7 +39,16 @@ class EncryptedKeyStorage(private val context: Context) {
         prefs.edit().remove(KEY_API_KEY).apply()
     }
 
+    fun getApiKeyPoolJson(): String {
+        return prefs.getString(KEY_API_KEY_POOL, "") ?: ""
+    }
+
+    fun setApiKeyPoolJson(json: String) {
+        prefs.edit().putString(KEY_API_KEY_POOL, json).apply()
+    }
+
     companion object {
         private const val KEY_API_KEY = "encrypted_gemini_api_key"
+        private const val KEY_API_KEY_POOL = "encrypted_gemini_api_key_pool"
     }
 }

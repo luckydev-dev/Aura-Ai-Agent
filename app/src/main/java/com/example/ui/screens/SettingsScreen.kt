@@ -1,10 +1,13 @@
 package com.example.ui.screens
 
+import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
@@ -15,39 +18,61 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import com.example.AuraApplication
 import com.example.core.audio.VoskModelManager
 import com.example.core.audio.VoskModelStatus
 import com.example.core.live.GeminiLiveHandshake
 import com.example.core.live.LiveDiagnostics
-import com.example.core.live.VoiceCatalog
 import com.example.core.root.PermissionCheckItem
 import com.example.core.root.PermissionDoctor
 import com.example.core.root.RootManager
 import com.example.core.settings.AuraPreferences
+import com.example.service.AuraAccessibilityService
 import com.example.service.AuraForegroundService
+import com.example.service.AuraNotificationListener
 import com.example.ui.components.*
+import com.example.ui.overlay.EdgeLightingState
+import com.example.ui.overlay.EdgeLightingView
+import com.example.ui.overlay.EdgeStyle
 import com.example.ui.theme.AuraTheme
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.Response
-import okhttp3.WebSocket
-import okhttp3.WebSocketListener
-import okio.ByteString
-import java.util.concurrent.TimeUnit
+
+enum class SettingsCategory(
+    val title: String,
+    val subtitle: String,
+    val icon: ImageVector
+) {
+    API_KEYS("API Keys & AI Models", "Manage Gemini key pool, auto-failover, and model selection", Icons.Default.VpnKey),
+    PERSONA("Persona & Identity", "Customize assistant name (Maya), preset profiles, and prompt editor", Icons.Default.Face),
+    EDGE_LIGHTING("Edge Lighting & Overlays", "Real-time edge glow preview, animation speed, and floating overlays", Icons.Default.Lightbulb),
+    OWNER_VOICE("Owner Voice & Security", "Voice enrollment, offline wake word, and screen lock automation", Icons.Default.Person),
+    PERMISSIONS("System Permissions", "Manage Accessibility, Overlay, Notifications, Mic, and Phone permissions", Icons.Default.Security),
+    SPEECH_CALLS("Speech, Language & Calls", "Hinglish default, live captions, incoming call announcements, soft ring", Icons.Default.PhoneCallback),
+    DEVICE_TOOLS("Device Automation & Tools", "Autonomous planner, device control tools, permissions, and timeouts", Icons.Default.Build)
+}
 
 @Composable
 fun SettingsScreen(
@@ -66,8 +91,13 @@ fun SettingsScreen(
     val permissionDoctor = remember { PermissionDoctor(context, rootManager) }
     val voskModelManager = remember { VoskModelManager(context) }
 
+    // Navigation Category State
+    var activeCategory by remember { mutableStateOf<SettingsCategory?>(null) }
+
     // Collected Preferences
     val apiKey by preferences.apiKey.collectAsState(initial = "")
+    val apiKeyPool by preferences.apiKeyPool.collectAsState(initial = emptyList())
+    var newKeyInput by remember { mutableStateOf("") }
     val modelName by preferences.modelName.collectAsState(initial = AuraPreferences.DEFAULT_MODEL)
     val voiceName by preferences.voiceName.collectAsState(initial = AuraPreferences.DEFAULT_VOICE)
     val thinkingLevel by preferences.thinkingLevel.collectAsState(initial = AuraPreferences.DEFAULT_THINKING_LEVEL)
@@ -87,9 +117,9 @@ fun SettingsScreen(
     val voskStatus by voskModelManager.status.collectAsState()
 
     val edgeLightingEnabled by preferences.edgeLightingEnabled.collectAsState(initial = true)
-    val edgeLightingThickness by preferences.edgeLightingThickness.collectAsState(initial = 8)
+    val edgeLightingStyle by preferences.edgeLightingStyle.collectAsState(initial = "NEON_RAINBOW")
+    val edgeLightingFlowSpeed by preferences.edgeLightingFlowSpeed.collectAsState(initial = 1.0f)
     val edgeLightingDepth by preferences.edgeLightingDepthPercent.collectAsState(initial = 22)
-    val edgeLightingTheme by preferences.edgeLightingTheme.collectAsState(initial = "Aura")
     val edgeLightingShowInApp by preferences.edgeLightingShowInApp.collectAsState(initial = true)
     val edgeLightingIntensity by preferences.edgeLightingIntensity.collectAsState(initial = 1.0f)
     val floatingCaptionsEnabled by preferences.floatingCaptionsEnabled.collectAsState(initial = true)
@@ -103,47 +133,35 @@ fun SettingsScreen(
 
     val ownerName by preferences.ownerName.collectAsState(initial = AuraPreferences.DEFAULT_OWNER_NAME)
     val extraInstructions by preferences.extraInstructions.collectAsState(initial = "")
-    val includeSystemApps by preferences.includeSystemApps.collectAsState(initial = true)
-
-    val confirmRisky by preferences.confirmRiskyActions.collectAsState(initial = true)
-    val isWaBusiness by preferences.isWhatsappBusiness.collectAsState(initial = false)
 
     // Local mutable state for text inputs
-    var inputApiKey by remember(apiKey) { mutableStateOf(apiKey) }
     var inputModel by remember(modelName) { mutableStateOf(modelName) }
     var inputThinkingLevel by remember(thinkingLevel) { mutableStateOf(thinkingLevel) }
-    var inputOwnerName by remember(ownerName) { mutableStateOf(ownerName) }
-    var inputExtraInstructions by remember(extraInstructions) { mutableStateOf(extraInstructions) }
 
-    // Voice catalog expansion state
-    var showAllVoices by remember { mutableStateOf(false) }
+    val screenLockType by preferences.screenLockType.collectAsState(initial = "NONE")
+    val savedPatternPoints by preferences.savedPatternPoints.collectAsState(initial = "")
+    val savedLockPin by preferences.savedLockPin.collectAsState(initial = "")
+    val savedLockPassword by preferences.savedLockPassword.collectAsState(initial = "")
+
+    var selectedLockPill by remember(screenLockType) {
+        mutableStateOf(if (screenLockType == "NONE" || screenLockType.isBlank()) "PATTERN" else screenLockType)
+    }
+    var patternStep by remember { mutableStateOf(1) }
+    var firstDrawnPattern by remember { mutableStateOf<List<Int>>(emptyList()) }
+    var patternStatusText by remember { mutableStateOf("Draw your unlock pattern to begin") }
+    var patternLockState by remember { mutableStateOf(PatternState.NORMAL) }
+    var pinInput by remember(savedLockPin) { mutableStateOf(savedLockPin) }
+    var pinConfirmInput by remember { mutableStateOf("") }
+    var passwordInput by remember(savedLockPassword) { mutableStateOf(savedLockPassword) }
+    var passwordConfirmInput by remember { mutableStateOf("") }
 
     // Test connection state
     var isTestingConnection by remember { mutableStateOf(false) }
-    var testConnectionStatus by remember { mutableStateOf<String?>(null) }
-    var showDiagnosticsModal by remember { mutableStateOf(false) }
 
     // Model fetching state
     var isFetchingModels by remember { mutableStateOf(false) }
     var fetchModelsMessage by remember { mutableStateOf<String?>(null) }
     var fetchModelsSuccess by remember { mutableStateOf(true) }
-
-    // Permission Doctor state
-    var permissionItems by remember { mutableStateOf<List<PermissionCheckItem>>(emptyList()) }
-    var isRunningDoctor by remember { mutableStateOf(false) }
-    var doctorReportText by remember { mutableStateOf<String?>(null) }
-
-    // Refresh permissions on initial compose
-    LaunchedEffect(Unit) {
-        permissionItems = permissionDoctor.getAllCheckItems()
-    }
-
-    // Keep diagnostics aware of currently configured key
-    LaunchedEffect(inputApiKey) {
-        if (inputApiKey.isNotBlank()) {
-            diagnostics.setAuthKey(inputApiKey)
-        }
-    }
 
     val displayedModels = remember(cachedLiveModels) {
         if (cachedLiveModels.isNotEmpty()) cachedLiveModels.toList() else AuraPreferences.INITIAL_LIVE_MODELS
@@ -161,1054 +179,940 @@ fun SettingsScreen(
                 .navigationBarsPadding()
                 .padding(horizontal = 20.dp)
         ) {
+            // Header Bar
             AuraTopBar(
-                title = "Settings & AI Configuration",
-                onBack = onBack
+                title = activeCategory?.title ?: "Settings & AI Hub",
+                onBack = {
+                    if (activeCategory != null) {
+                        activeCategory = null
+                    } else {
+                        onBack()
+                    }
+                }
             )
 
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
-            LazyColumn(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                // 1. API Key Card
-                item {
-                    AuraCard(modifier = Modifier.fillMaxWidth()) {
-                        androidx.compose.foundation.text.BasicText(
-                            text = "Gemini API Key",
-                            style = typography.titleMedium.copy(color = colors.textPrimary)
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        androidx.compose.foundation.text.BasicText(
-                            text = "Required for Gemini Live bidirectional voice streaming.",
-                            style = typography.bodySmall.copy(color = colors.textSecondary)
-                        )
-                        Spacer(modifier = Modifier.height(10.dp))
-                        AuraTextField(
-                            value = inputApiKey,
-                            onValueChange = {
-                                inputApiKey = it
-                                scope.launch { preferences.setApiKey(it) }
-                            },
-                            placeholder = "AIzaSy...",
-                            testTag = "api_key_field"
-                        )
-                        Spacer(modifier = Modifier.height(6.dp))
-                        androidx.compose.foundation.text.BasicText(
-                            text = "Format: ${GeminiLiveHandshake.getKeyTypeDescription(inputApiKey)}",
-                            style = typography.labelSmall.copy(color = colors.textTertiary)
-                        )
-                        Spacer(modifier = Modifier.height(10.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            AuraButton(
-                                text = if (isTestingConnection) "Testing Live..." else "Test Connection",
-                                onClick = {
-                                    scope.launch {
-                                        isTestingConnection = true
-                                        testConnectionStatus = "Connecting to Live WebSocket..."
-                                        val result = testGeminiLiveWebSocket(
-                                            apiKey = inputApiKey,
-                                            model = inputModel,
-                                            thinkingLevel = inputThinkingLevel,
-                                            diagnostics = diagnostics
-                                        )
-                                        testConnectionStatus = result
-                                        isTestingConnection = false
-                                    }
-                                },
-                                isPrimary = false,
-                                enabled = !isTestingConnection && inputApiKey.isNotBlank(),
-                                testTag = "test_connection_btn"
-                            )
-                            testConnectionStatus?.let { status ->
-                                val isSuccess = status.startsWith("Live OK") || status.contains("ready")
-                                androidx.compose.foundation.text.BasicText(
-                                    text = status,
-                                    style = typography.labelSmall.copy(
-                                        color = if (isSuccess) colors.success else colors.danger
-                                    ),
-                                    modifier = Modifier.padding(start = 8.dp)
-                                )
-                            }
-                        }
-                    }
-                }
-
-                // 2. Language & Speech Settings
-                item {
-                    AuraCard(modifier = Modifier.fillMaxWidth()) {
-                        androidx.compose.foundation.text.BasicText(
-                            text = "Language & Speech",
-                            style = typography.titleMedium.copy(color = colors.textPrimary)
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        androidx.compose.foundation.text.BasicText(
-                            text = "Default language: Hinglish (natural Hindi + English mix with Indian context).",
-                            style = typography.bodySmall.copy(color = colors.textSecondary)
-                        )
-                        Spacer(modifier = Modifier.height(10.dp))
-
-                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            items(AuraPreferences.LANGUAGE_OPTIONS) { lang ->
-                                AuraChip(
-                                    text = lang,
-                                    selected = defaultLanguage == lang,
-                                    onClick = {
-                                        scope.launch {
-                                            preferences.setDefaultLanguage(lang)
-                                            diagnostics.setLanguage(lang)
-                                        }
-                                    }
-                                )
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(14.dp))
-                        AuraToggleRow(
-                            title = "Greet on Connect",
-                            subtitle = "Aura speaks a brief friendly greeting upon opening the voice session.",
-                            checked = greetOnConnect,
-                            onCheckedChange = { scope.launch { preferences.setGreetOnConnect(it) } },
-                            testTag = "toggle_greet_on_connect"
-                        )
-
-                        Spacer(modifier = Modifier.height(14.dp))
-                        AuraToggleRow(
-                            title = "Live Speech Captions",
-                            subtitle = "Display live dual-line subtitles for you and Aura during the call.",
-                            checked = showCaptions,
-                            onCheckedChange = { scope.launch { preferences.setShowCaptions(it) } },
-                            testTag = "toggle_show_captions"
-                        )
-                    }
-                }
-
-                // 3. Audio & Interruption Protection
-                item {
-                    AuraCard(modifier = Modifier.fillMaxWidth()) {
-                        androidx.compose.foundation.text.BasicText(
-                            text = "Anti-Interruption & Audio Processing",
-                            style = typography.titleMedium.copy(color = colors.textPrimary)
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        androidx.compose.foundation.text.BasicText(
-                            text = "Adaptive noise gate (120Hz filter) prevents accidental cuts from breathing or background noise.",
-                            style = typography.bodySmall.copy(color = colors.textSecondary)
-                        )
-                        Spacer(modifier = Modifier.height(12.dp))
-
-                        AuraToggleRow(
-                            title = "Allow Interrupting Aura",
-                            subtitle = "Allows your voice to cut off Aura while she is talking.",
-                            checked = allowInterrupting,
-                            onCheckedChange = { scope.launch { preferences.setAllowInterrupting(it) } },
-                            testTag = "toggle_allow_interrupting"
-                        )
-
-                        Spacer(modifier = Modifier.height(12.dp))
-                        androidx.compose.foundation.text.BasicText(
-                            text = "Interruption Sensitivity",
-                            style = typography.labelLarge.copy(color = colors.textPrimary)
-                        )
-                        Spacer(modifier = Modifier.height(6.dp))
-                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            items(AuraPreferences.INTERRUPTION_SENSITIVITY_OPTIONS) { opt ->
-                                AuraChip(
-                                    text = opt,
-                                    selected = interruptionSens == opt,
-                                    onClick = { scope.launch { preferences.setInterruptionSensitivity(opt) } }
-                                )
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(12.dp))
-                        androidx.compose.foundation.text.BasicText(
-                            text = "Noise Gate Strength",
-                            style = typography.labelLarge.copy(color = colors.textPrimary)
-                        )
-                        Spacer(modifier = Modifier.height(6.dp))
-                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            items(AuraPreferences.NOISE_GATE_OPTIONS) { gateOpt ->
-                                AuraChip(
-                                    text = gateOpt,
-                                    selected = noiseGateStrength == gateOpt,
-                                    onClick = { scope.launch { preferences.setNoiseGateStrength(gateOpt) } }
-                                )
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(12.dp))
-                        androidx.compose.foundation.text.BasicText(
-                            text = "Auto-Hangup on Silence",
-                            style = typography.labelLarge.copy(color = colors.textPrimary)
-                        )
-                        Spacer(modifier = Modifier.height(6.dp))
-                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            val hangupOptions = listOf(15 to "15s", 30 to "30s (Default)", 60 to "60s", 0 to "Disabled")
-                            items(hangupOptions) { (sec, label) ->
-                                AuraChip(
-                                    text = label,
-                                    selected = autoHangupSec == sec,
-                                    onClick = { scope.launch { preferences.setAutoHangupSeconds(sec) } }
-                                )
-                            }
-                        }
-                    }
-                }
-
-                // 4. Real Vosk "Hey Aura" Wake Word Card
-                item {
-                    AuraCard(modifier = Modifier.fillMaxWidth()) {
-                        androidx.compose.foundation.text.BasicText(
-                            text = "Offline Wake Word (\"Hey Aura\")",
-                            style = typography.titleMedium.copy(color = colors.textPrimary)
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        androidx.compose.foundation.text.BasicText(
-                            text = "Powered by local Vosk Indian-English acoustic model (36 MB). Zero cloud audio transmission until activated.",
-                            style = typography.bodySmall.copy(color = colors.textSecondary)
-                        )
-                        Spacer(modifier = Modifier.height(12.dp))
-
-                        AuraToggleRow(
-                            title = "Listen for \"Hey Aura\"",
-                            subtitle = "Continuously listens for wake trigger in background service.",
-                            checked = wakeEnabled,
-                            onCheckedChange = { scope.launch { preferences.setWakePhraseEnabled(it) } },
-                            testTag = "toggle_wake_phrase"
-                        )
-
-                        Spacer(modifier = Modifier.height(12.dp))
-                        androidx.compose.foundation.text.BasicText(
-                            text = "Wake Word Sensitivity",
-                            style = typography.labelLarge.copy(color = colors.textPrimary)
-                        )
-                        Spacer(modifier = Modifier.height(6.dp))
-                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            items(AuraPreferences.WAKE_SENSITIVITY_OPTIONS) { s ->
-                                AuraChip(
-                                    text = s.replaceFirstChar { it.uppercase() },
-                                    selected = wakeSensitivity == s,
-                                    onClick = { scope.launch { preferences.setWakeWordSensitivity(s) } }
-                                )
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(12.dp))
-                        // Vosk Model Download / Readiness status
-                        when (val status = voskStatus) {
-                            is VoskModelStatus.Ready -> {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    AuraBadge(text = "✓ Vosk Model Ready (Offline)", isSuccess = true)
-                                    AuraButton(
-                                        text = "Test Wake Detection",
-                                        onClick = {
-                                            Toast.makeText(
-                                                context,
-                                                "Say 'Hey Aura' or 'Aura' clearly to test.",
-                                                Toast.LENGTH_SHORT
-                                            ).show()
-                                        },
-                                        isPrimary = false
-                                    )
-                                }
-                            }
-                            is VoskModelStatus.Downloading -> {
-                                Column(modifier = Modifier.fillMaxWidth()) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween
-                                    ) {
-                                        androidx.compose.foundation.text.BasicText(
-                                            text = "Downloading Model (${status.progressPercent}%)...",
-                                            style = typography.labelSmall.copy(color = colors.accentStart)
-                                        )
-                                        androidx.compose.foundation.text.BasicText(
-                                            text = "${status.bytesDownloaded / 1024 / 1024}MB / ${status.totalBytes / 1024 / 1024}MB",
-                                            style = typography.labelSmall.copy(color = colors.textSecondary)
-                                        )
-                                    }
-                                    Spacer(modifier = Modifier.height(6.dp))
-                                    Box(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .height(6.dp)
-                                            .clip(RoundedCornerShape(3.dp))
-                                            .background(colors.surfaceRaised)
-                                    ) {
-                                        Box(
-                                            modifier = Modifier
-                                                .fillMaxWidth(status.progressPercent / 100f)
-                                                .fillMaxHeight()
-                                                .background(colors.accentMiddle)
-                                        )
-                                    }
-                                }
-                            }
-                            is VoskModelStatus.NotDownloaded, is VoskModelStatus.Error -> {
-                                if (status is VoskModelStatus.Error) {
-                                    androidx.compose.foundation.text.BasicText(
-                                        text = "Error: ${status.message}",
-                                        style = typography.labelSmall.copy(color = colors.danger)
-                                    )
-                                    Spacer(modifier = Modifier.height(6.dp))
-                                }
-                                AuraButton(
-                                    text = "Download Wake Model (~36 MB)",
-                                    onClick = {
-                                        scope.launch {
-                                            val res = voskModelManager.downloadAndExtractModel()
-                                            if (res.isSuccess) {
-                                                Toast.makeText(context, "Vosk model downloaded successfully", Toast.LENGTH_SHORT).show()
-                                            } else {
-                                                Toast.makeText(context, "Download failed: ${res.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
-                                            }
-                                        }
-                                    },
-                                    isPrimary = true,
-                                    modifier = Modifier.fillMaxWidth()
-                                )
-                            }
-                        }
-                    }
-                }
-
-                // 5. Edge Lighting & Floating Overlays Controls
-                item {
-                    AuraCard(modifier = Modifier.fillMaxWidth()) {
-                        androidx.compose.foundation.text.BasicText(
-                            text = "Edge Lighting & Floating Overlays",
-                            style = typography.titleMedium.copy(color = colors.textPrimary)
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        androidx.compose.foundation.text.BasicText(
-                            text = "Soft perimeter glow fades smoothly toward center (AGSL on Android 13+, multi-stop gradient on 8.0-12).",
-                            style = typography.bodySmall.copy(color = colors.textSecondary)
-                        )
-                        Spacer(modifier = Modifier.height(12.dp))
-
-                        AuraToggleRow(
-                            title = "Edge Lighting Overlay",
-                            subtitle = "Perimeter gradient glow reflecting live Aura state.",
-                            checked = edgeLightingEnabled,
-                            onCheckedChange = { scope.launch { preferences.setEdgeLightingEnabled(it) } },
-                            testTag = "toggle_edge_lighting"
-                        )
-
-                        Spacer(modifier = Modifier.height(10.dp))
-                        androidx.compose.foundation.text.BasicText(
-                            text = "Glow Depth (Inward Spread)",
-                            style = typography.labelLarge.copy(color = colors.textPrimary)
-                        )
-                        Spacer(modifier = Modifier.height(6.dp))
-                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            val depths = listOf(8 to "8%", 15 to "15%", 22 to "22% (Default)", 30 to "30%", 40 to "40%")
-                            items(depths) { (dVal, lbl) ->
-                                AuraChip(
-                                    text = lbl,
-                                    selected = edgeLightingDepth == dVal,
-                                    onClick = { scope.launch { preferences.setEdgeLightingDepthPercent(dVal) } }
-                                )
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(10.dp))
-                        androidx.compose.foundation.text.BasicText(
-                            text = "Color Theme",
-                            style = typography.labelLarge.copy(color = colors.textPrimary)
-                        )
-                        Spacer(modifier = Modifier.height(6.dp))
-                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            val themes = listOf("Aura", "Cyberpunk", "Sunset", "Emerald")
-                            items(themes) { t ->
-                                AuraChip(
-                                    text = t,
-                                    selected = edgeLightingTheme.equals(t, ignoreCase = true),
-                                    onClick = { scope.launch { preferences.setEdgeLightingTheme(t) } }
-                                )
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(12.dp))
-                        AuraToggleRow(
-                            title = "Show Edge Glow Inside Aura App",
-                            subtitle = "When disabled, edge glow only appears over external apps.",
-                            checked = edgeLightingShowInApp,
-                            onCheckedChange = { scope.launch { preferences.setEdgeLightingShowInApp(it) } }
-                        )
-
-                        Spacer(modifier = Modifier.height(12.dp))
-                        AuraToggleRow(
-                            title = "Floating Live Captions",
-                            subtitle = "Compact auto-expanding live transcription pill over external apps.",
-                            checked = floatingCaptionsEnabled,
-                            onCheckedChange = { scope.launch { preferences.setFloatingCaptionsEnabled(it) } },
-                            testTag = "toggle_floating_captions"
-                        )
-
-                        Spacer(modifier = Modifier.height(12.dp))
-                        AuraToggleRow(
-                            title = "Floating Mini-Orb Overlay",
-                            subtitle = "Draggable floating orb outside the app for quick control.",
-                            checked = overlayEnabled,
-                            onCheckedChange = { scope.launch { preferences.setOverlayEnabled(it) } },
-                            testTag = "toggle_mini_orb"
-                        )
-                    }
-                }
-
-                // 5b. Session Timeouts & Autonomous Agent Planner
-                item {
-                    AuraCard(modifier = Modifier.fillMaxWidth()) {
-                        androidx.compose.foundation.text.BasicText(
-                            text = "Timeouts & Autonomous Agent",
-                            style = typography.titleMedium.copy(color = colors.textPrimary)
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        androidx.compose.foundation.text.BasicText(
-                            text = "Control session watchdog countdowns and autonomous phone automation planning.",
-                            style = typography.bodySmall.copy(color = colors.textSecondary)
-                        )
-                        Spacer(modifier = Modifier.height(12.dp))
-
-                        androidx.compose.foundation.text.BasicText(
-                            text = "Idle Silence Hangup",
-                            style = typography.labelLarge.copy(color = colors.textPrimary)
-                        )
-                        Spacer(modifier = Modifier.height(6.dp))
-                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            val silenceOptions = listOf(2 to "2 min", 5 to "5 min (Default)", 10 to "10 min", 15 to "15 min")
-                            items(silenceOptions) { (minVal, lbl) ->
-                                AuraChip(
-                                    text = lbl,
-                                    selected = idleSilenceMinutes == minVal,
-                                    onClick = { scope.launch { preferences.setIdleSilenceHangupMinutes(minVal) } }
-                                )
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(12.dp))
-                        AuraToggleRow(
-                            title = "Keep Call Alive When Screen Turns Off",
-                            subtitle = "If disabled, countdown starts when phone screen turns off.",
-                            checked = keepAliveScreenOff,
-                            onCheckedChange = { scope.launch { preferences.setKeepAliveScreenOff(it) } }
-                        )
-
-                        if (!keepAliveScreenOff) {
-                            Spacer(modifier = Modifier.height(10.dp))
-                            androidx.compose.foundation.text.BasicText(
-                                text = "Screen-Off Disconnect Countdown",
-                                style = typography.labelLarge.copy(color = colors.textPrimary)
-                            )
-                            Spacer(modifier = Modifier.height(6.dp))
-                            LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                val screenOffOptions = listOf(1 to "1 min", 3 to "3 min (Default)", 5 to "5 min", 10 to "10 min")
-                                items(screenOffOptions) { (minVal, lbl) ->
-                                    AuraChip(
-                                        text = lbl,
-                                        selected = screenOffTimeoutMinutes == minVal,
-                                        onClick = { scope.launch { preferences.setScreenOffTimeoutMinutes(minVal) } }
-                                    )
-                                }
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(14.dp))
-                        androidx.compose.foundation.text.BasicText(
-                            text = "Autonomous Agent Planner Model",
-                            style = typography.labelLarge.copy(color = colors.textPrimary)
-                        )
-                        Spacer(modifier = Modifier.height(6.dp))
-                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            val plannerModels = listOf(
-                                "gemini-2.5-flash" to "2.5 Flash (Fast)",
-                                "gemini-2.5-pro" to "2.5 Pro (Deep)",
-                                "gemini-3.8-flash" to "3.8 Flash"
-                            )
-                            items(plannerModels) { (mId, mLbl) ->
-                                AuraChip(
-                                    text = mLbl,
-                                    selected = plannerModelName.contains(mId, ignoreCase = true),
-                                    onClick = { scope.launch { preferences.setPlannerModelName(mId) } }
-                                )
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(12.dp))
-                        AuraToggleRow(
-                            title = "Planner Vision (Downscaled Screenshots)",
-                            subtitle = "Sends compressed 768px JPEG screenshot alongside accessibility hierarchy.",
-                            checked = plannerUseScreenshots,
-                            onCheckedChange = { scope.launch { preferences.setPlannerUseScreenshots(it) } }
-                        )
-                    }
-                }
-
-                // 6. Agent Voice Selection (All 30 Voices Catalog)
-                item {
-                    val activeVoiceInfo = VoiceCatalog.findVoice(voiceName) ?: VoiceCatalog.VOICES.first()
-                    AuraCard(modifier = Modifier.fillMaxWidth()) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                androidx.compose.foundation.text.BasicText(
-                                    text = "Agent Voice (${VoiceCatalog.VOICES.size} Available)",
-                                    style = typography.titleMedium.copy(color = colors.textPrimary)
-                                )
-                                Spacer(modifier = Modifier.height(2.dp))
-                                androidx.compose.foundation.text.BasicText(
-                                    text = "Selected: ${activeVoiceInfo.name} (${activeVoiceInfo.gender}) - ${activeVoiceInfo.styleNote}",
-                                    style = typography.bodySmall.copy(color = colors.accentStart)
-                                )
-                            }
-                            AuraButton(
-                                text = if (showAllVoices) "Collapse" else "Show All",
-                                onClick = { showAllVoices = !showAllVoices },
-                                isPrimary = false
-                            )
-                        }
-
-                        Spacer(modifier = Modifier.height(10.dp))
-
-                        val displayList = if (showAllVoices) VoiceCatalog.VOICES else VoiceCatalog.VOICES.take(8)
-                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            items(displayList) { v ->
-                                AuraChip(
-                                    text = "${v.name} (${v.gender.first()})",
-                                    selected = voiceName.equals(v.name, ignoreCase = true),
-                                    onClick = {
-                                        scope.launch {
-                                            preferences.setVoiceName(v.name)
-                                            diagnostics.setVoice(v.name)
-                                        }
-                                    }
-                                )
-                            }
-                        }
-                    }
-                }
-
-                // 7. Gemini Live Model Selection
-                item {
-                    AuraCard(modifier = Modifier.fillMaxWidth()) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            androidx.compose.foundation.text.BasicText(
-                                text = "Gemini Live Model",
-                                style = typography.titleMedium.copy(color = colors.textPrimary)
-                            )
-                            AuraButton(
-                                text = if (isFetchingModels) "Fetching..." else "Fetch available Live models",
-                                onClick = {
-                                    scope.launch {
-                                        isFetchingModels = true
-                                        fetchModelsMessage = "Querying supported bidi models..."
-                                        val result = GeminiLiveHandshake.fetchAvailableLiveModels(inputApiKey)
-                                        result.onSuccess { models ->
-                                            preferences.setCachedLiveModels(models.toSet())
-                                            fetchModelsSuccess = true
-                                            fetchModelsMessage = "Fetched ${models.size} Live model(s)"
-                                        }.onFailure { err ->
-                                            fetchModelsSuccess = false
-                                            fetchModelsMessage = "Fetch failed: ${err.message}"
-                                        }
-                                        isFetchingModels = false
-                                    }
-                                },
-                                isPrimary = false,
-                                enabled = !isFetchingModels && inputApiKey.isNotBlank()
-                            )
-                        }
-
-                        fetchModelsMessage?.let { msg ->
-                            Spacer(modifier = Modifier.height(4.dp))
-                            androidx.compose.foundation.text.BasicText(
-                                text = msg,
-                                style = typography.labelSmall.copy(
-                                    color = if (fetchModelsSuccess) colors.success else colors.danger
-                                )
-                            )
-                        }
-
-                        Spacer(modifier = Modifier.height(8.dp))
-                        androidx.compose.foundation.text.BasicText(
-                            text = "Select active model supporting bidirectional streaming (bidiGenerateContent):",
-                            style = typography.bodySmall.copy(color = colors.textSecondary)
-                        )
-                        Spacer(modifier = Modifier.height(10.dp))
-
-                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            items(displayedModels) { model ->
-                                AuraChip(
-                                    text = model,
-                                    selected = inputModel == model,
-                                    onClick = {
-                                        inputModel = model
-                                        scope.launch { preferences.setModelName(model) }
-                                    }
-                                )
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(10.dp))
-                        AuraTextField(
-                            value = inputModel,
-                            onValueChange = {
-                                inputModel = it
-                                scope.launch { preferences.setModelName(it) }
-                            },
-                            placeholder = "gemini-3.8-live",
-                            testTag = "model_field"
-                        )
-
-                        if (displayedModels.isNotEmpty() && !displayedModels.contains(inputModel)) {
-                            Spacer(modifier = Modifier.height(8.dp))
-                            androidx.compose.foundation.text.BasicText(
-                                text = "⚠️ This model is not available for your key. Pick one from the fetched list above.",
-                                style = typography.labelSmall.copy(color = colors.warning)
-                            )
-                        }
-
-                        if (inputModel.equals("gemini-3.8-live-extended-thinking", ignoreCase = true)) {
-                            Spacer(modifier = Modifier.height(14.dp))
-                            androidx.compose.foundation.text.BasicText(
-                                text = "Thinking Level (Required for Extended Thinking)",
-                                style = typography.labelLarge.copy(color = colors.accentStart)
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
-                            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                items(AuraPreferences.THINKING_LEVEL_OPTIONS) { level ->
-                                    AuraChip(
-                                        text = level,
-                                        selected = inputThinkingLevel == level,
-                                        onClick = {
-                                            inputThinkingLevel = level
-                                            scope.launch { preferences.setThinkingLevel(level) }
-                                        }
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // 8. Persona & Owner Customization
-                item {
-                    AuraCard(modifier = Modifier.fillMaxWidth()) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            androidx.compose.foundation.text.BasicText(
-                                text = "Owner & Persona Customization",
-                                style = typography.titleMedium.copy(color = colors.textPrimary)
-                            )
-                            AuraButton(
-                                text = "Reset Extra",
-                                onClick = {
-                                    scope.launch {
-                                        preferences.resetExtraInstructions()
-                                        inputExtraInstructions = ""
-                                    }
-                                },
-                                isPrimary = false
-                            )
-                        }
-                        Spacer(modifier = Modifier.height(8.dp))
-
-                        androidx.compose.foundation.text.BasicText(
-                            text = "Owner Name / Nickname",
-                            style = typography.labelLarge.copy(color = colors.textSecondary)
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        AuraTextField(
-                            value = inputOwnerName,
-                            onValueChange = {
-                                inputOwnerName = it
-                                scope.launch { preferences.setOwnerName(it) }
-                            },
-                            placeholder = AuraPreferences.DEFAULT_OWNER_NAME,
-                            testTag = "owner_name_field"
-                        )
-
-                        Spacer(modifier = Modifier.height(12.dp))
-                        androidx.compose.foundation.text.BasicText(
-                            text = "Custom / Extra Instructions",
-                            style = typography.labelLarge.copy(color = colors.textSecondary)
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        AuraTextField(
-                            value = inputExtraInstructions,
-                            onValueChange = {
-                                inputExtraInstructions = it
-                                scope.launch { preferences.setExtraInstructions(it) }
-                            },
-                            singleLine = false,
-                            placeholder = "Optional preferences (e.g. 'Speak extra concisely', 'Always confirm before sending emails')...",
-                            testTag = "extra_instructions_field"
-                        )
-
-                        Spacer(modifier = Modifier.height(12.dp))
-                        AuraToggleRow(
-                            title = "Include System Apps in Inventory",
-                            subtitle = "Feeds full package inventory to Aura for direct opening without guessing.",
-                            checked = includeSystemApps,
-                            onCheckedChange = { scope.launch { preferences.setIncludeSystemApps(it) } }
-                        )
-                    }
-                }
-
-                // 9. Permission Doctor & Root Health Check Card
-                item {
-                    AuraCard(modifier = Modifier.fillMaxWidth()) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                androidx.compose.foundation.text.BasicText(
-                                    text = "Permission Doctor",
-                                    style = typography.titleMedium.copy(color = colors.textPrimary)
-                                )
-                                Spacer(modifier = Modifier.height(2.dp))
-                                androidx.compose.foundation.text.BasicText(
-                                    text = "Diagnose and auto-grant permissions via Root/SU.",
-                                    style = typography.bodySmall.copy(color = colors.textSecondary)
-                                )
-                            }
-                            AuraButton(
-                                text = if (isRunningDoctor) "Fixing..." else "Auto-Fix All",
-                                onClick = {
-                                    scope.launch {
-                                        isRunningDoctor = true
-                                        val isRoot = rootManager.isRootAvailable()
-                                        if (isRoot) {
-                                            rootManager.autoGrantEverything()
-                                            permissionDoctor.runSilentHealthCheck()
-                                            permissionDoctor.applyOemFixes()
-                                            doctorReportText = "Auto-granted all system permissions via root."
-                                        } else {
-                                            doctorReportText = "Root not detected. Please grant permissions manually."
-                                        }
-                                        permissionItems = permissionDoctor.getAllCheckItems()
-                                        isRunningDoctor = false
-                                    }
-                                },
-                                isPrimary = false,
-                                enabled = !isRunningDoctor
-                            )
-                        }
-
-                        doctorReportText?.let { report ->
-                            Spacer(modifier = Modifier.height(6.dp))
-                            androidx.compose.foundation.text.BasicText(
-                                text = report,
-                                style = typography.labelSmall.copy(color = colors.accentStart)
-                            )
-                        }
-
-                        Spacer(modifier = Modifier.height(10.dp))
-
-                        // Check items list
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            permissionItems.forEach { item ->
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(colors.surfaceRaised)
-                                        .padding(10.dp),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                                        androidx.compose.foundation.text.BasicText(
-                                            text = item.title,
-                                            style = typography.bodyMedium.copy(color = colors.textPrimary)
-                                        )
-                                        androidx.compose.foundation.text.BasicText(
-                                            text = item.description,
-                                            style = typography.labelSmall.copy(color = colors.textTertiary)
-                                        )
-                                    }
-                                    if (item.isGranted) {
-                                        AuraBadge(text = "✓ Granted", isSuccess = true)
-                                    } else {
-                                        AuraButton(
-                                            text = "Fix",
-                                            onClick = {
-                                                scope.launch {
-                                                    item.fixAction()
-                                                    permissionItems = permissionDoctor.getAllCheckItems()
-                                                }
-                                            },
-                                            isPrimary = false
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // 10. General System Toggles
-                item {
-                    AuraCard(modifier = Modifier.fillMaxWidth()) {
-                        AuraToggleRow(
-                            title = "Confirm Risky Actions",
-                            subtitle = "Voice confirmation required before delete, reboot, or critical changes.",
-                            checked = confirmRisky,
-                            onCheckedChange = { scope.launch { preferences.setConfirmRiskyActions(it) } },
-                            testTag = "toggle_confirm_risky"
-                        )
-                        Spacer(modifier = Modifier.height(14.dp))
-                        AuraToggleRow(
-                            title = "Target WhatsApp Business",
-                            subtitle = "Automate messages through com.whatsapp.w4b rather than standard WhatsApp.",
-                            checked = isWaBusiness,
-                            onCheckedChange = { scope.launch { preferences.setWhatsappBusiness(it) } },
-                            testTag = "toggle_wa_business"
-                        )
-                    }
-                }
-
-                // 11. Live Diagnostics Panel Trigger
-                item {
-                    AuraCard(modifier = Modifier.fillMaxWidth()) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                androidx.compose.foundation.text.BasicText(
-                                    text = "Live Diagnostics & Telemetry",
-                                    style = typography.titleMedium.copy(color = colors.textPrimary)
-                                )
-                                Spacer(modifier = Modifier.height(4.dp))
-                                androidx.compose.foundation.text.BasicText(
-                                    text = "Inspect WebSocket frames, noise floor, gate state, and recent events.",
-                                    style = typography.bodySmall.copy(color = colors.textSecondary)
-                                )
-                            }
-                            Spacer(modifier = Modifier.width(8.dp))
-                            AuraButton(
-                                text = "View Logs",
-                                onClick = { showDiagnosticsModal = true },
-                                isPrimary = false,
-                                testTag = "open_diagnostics_btn"
-                            )
-                        }
-                    }
-                }
-
-                // 12. Setup Wizard Launcher
-                item {
-                    AuraButton(
-                        text = "Re-run Setup Wizard & Hardware Test",
-                        onClick = onNavigateToSetup,
-                        isPrimary = false,
-                        modifier = Modifier.fillMaxWidth(),
-                        testTag = "rerun_setup_btn"
-                    )
-                    Spacer(modifier = Modifier.height(20.dp))
-                }
-            }
-        }
-
-        // Live Diagnostics Full Modal
-        if (showDiagnosticsModal) {
-            val diagState by diagnostics.connectionState.collectAsState()
-            val diagModel by diagnostics.currentModel.collectAsState()
-            val diagAuth by diagnostics.authKeyType.collectAsState()
-            val diagHttpCode by diagnostics.httpUpgradeResponseCode.collectAsState()
-            val diagFramesCount by diagnostics.framesReceivedCount.collectAsState()
-            val diagTextFrames by diagnostics.textFramesCount.collectAsState()
-            val diagBinaryFrames by diagnostics.binaryFramesCount.collectAsState()
-            val diagLastFrame by diagnostics.lastFramePreview.collectAsState()
-            val diagLastClose by diagnostics.lastCloseCodeAndReason.collectAsState()
-            val diagSent by diagnostics.bytesAudioSent.collectAsState()
-            val diagRecv by diagnostics.bytesAudioReceived.collectAsState()
-            val diagSetupOk by diagnostics.setupCompleteArrived.collectAsState()
-            val diagNoiseFloor by diagnostics.noiseFloor.collectAsState()
-            val diagNoiseGate by diagnostics.noiseGateStatus.collectAsState()
-            val diagInterruptions by diagnostics.recentInterruptionsCount.collectAsState()
-            val diagCaptionTurn by diagnostics.captionTurnInfo.collectAsState()
-            val diagOverlayState by diagnostics.overlayStateInfo.collectAsState()
-            val diagWakeState by diagnostics.wakeWordState.collectAsState()
-            val diagAppInv by diagnostics.appInventorySize.collectAsState()
-            val diagThoughts by diagnostics.thoughtHistory.collectAsState()
-            val diagLogs by diagnostics.lastServerMessageTypes.collectAsState()
-            val diagUptime = diagnostics.getUptimeFormatted()
-
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.75f))
-                    .clickable { showDiagnosticsModal = false },
-                contentAlignment = Alignment.Center
-            ) {
-                AuraCard(
-                    modifier = Modifier
-                        .fillMaxWidth(0.95f)
-                        .fillMaxHeight(0.92f)
-                        .clickable(enabled = false) {}
+            if (activeCategory == null) {
+                // CATEGORICAL SETTINGS HUB (Vertical List with Navigation Arrows)
+                LazyColumn(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        androidx.compose.foundation.text.BasicText(
-                            text = "Live Diagnostics & Telemetry",
-                            style = typography.titleMedium.copy(color = colors.textPrimary)
-                        )
-                        AuraButton(
-                            text = "Close",
-                            onClick = { showDiagnosticsModal = false },
-                            isPrimary = false
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    LazyColumn(
-                        modifier = Modifier.weight(1f),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        item {
-                            DiagnosticRow("Live State", diagState, colors.accentStart)
-                            DiagnosticRow("Model", diagModel, colors.textPrimary)
-                            DiagnosticRow("Auth Key Type", diagAuth, if (diagAuth.startsWith("AQ")) colors.warning else colors.textPrimary)
-                            DiagnosticRow("Setup Complete", if (diagSetupOk) "YES (Received)" else "NO", if (diagSetupOk) colors.success else colors.warning)
-                            DiagnosticRow("HTTP Upgrade", if (diagHttpCode > 0) "$diagHttpCode" else "None", if (diagHttpCode == 101) colors.success else colors.textPrimary)
-                            DiagnosticRow("Socket Connected", diagUptime, colors.textPrimary)
-                            DiagnosticRow("Frames Received", "$diagFramesCount (text $diagTextFrames / binary $diagBinaryFrames)", if (diagFramesCount > 0) colors.success else colors.textSecondary)
-                            DiagnosticRow("Audio Bytes Sent", "$diagSent bytes", if (diagSent > 0) colors.success else colors.textPrimary)
-                            DiagnosticRow("Audio Bytes Received", "$diagRecv bytes", if (diagRecv > 0) colors.success else colors.textPrimary)
-                            DiagnosticRow("Noise Floor", diagNoiseFloor, colors.textPrimary)
-                            DiagnosticRow("Noise Gate", diagNoiseGate, if (diagNoiseGate.startsWith("OPEN")) colors.success else colors.textSecondary)
-                            DiagnosticRow("Interruptions", "$diagInterruptions", if (diagInterruptions > 0) colors.warning else colors.textPrimary)
-                            DiagnosticRow("Caption State", diagCaptionTurn, colors.accentStart)
-                            DiagnosticRow("Overlay State", diagOverlayState, colors.textPrimary)
-                            DiagnosticRow("Wake Word Engine", diagWakeState, colors.textPrimary)
-                            DiagnosticRow("App Inventory", diagAppInv, colors.textPrimary)
-                            DiagnosticRow("Last Close Code", diagLastClose, colors.textSecondary)
-                        }
-
-                        // Last Frame Preview
-                        item {
-                            Spacer(modifier = Modifier.height(6.dp))
-                            androidx.compose.foundation.text.BasicText(
-                                text = "Last Frame Preview:",
-                                style = typography.labelLarge.copy(color = colors.textPrimary)
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Box(
+                    items(SettingsCategory.values()) { category ->
+                        Card(
+                            shape = RoundedCornerShape(16.dp),
+                            colors = CardDefaults.cardColors(containerColor = colors.surface),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .border(1.dp, colors.border, RoundedCornerShape(16.dp))
+                                .clickable { activeCategory = category }
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(colors.surfaceRaised)
-                                    .border(1.dp, colors.border, RoundedCornerShape(8.dp))
-                                    .padding(8.dp)
+                                    .padding(16.dp)
                             ) {
-                                androidx.compose.foundation.text.BasicText(
-                                    text = diagLastFrame.ifBlank { "No frame received yet." },
-                                    style = typography.bodySmall.copy(color = colors.textSecondary)
-                                )
-                            }
-                        }
+                                Box(
+                                    modifier = Modifier
+                                        .size(46.dp)
+                                        .clip(CircleShape)
+                                        .background(Color(0xFF23283B)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = category.icon,
+                                        contentDescription = null,
+                                        tint = Color(0xFF7085FF),
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                }
 
-                        // Recent Thoughts Section (Filtered from captions)
-                        if (diagThoughts.isNotEmpty()) {
-                            item {
-                                Spacer(modifier = Modifier.height(8.dp))
-                                androidx.compose.foundation.text.BasicText(
-                                    text = "Model Internal Thoughts (Filtered):",
-                                    style = typography.titleMedium.copy(color = colors.accentStart)
-                                )
-                            }
-                            items(diagThoughts.takeLast(5)) { thought ->
-                                androidx.compose.foundation.text.BasicText(
-                                    text = "🧠 $thought",
-                                    style = typography.labelSmall.copy(color = colors.textSecondary)
-                                )
-                            }
-                        }
+                                Spacer(modifier = Modifier.width(14.dp))
 
-                        item {
-                            Spacer(modifier = Modifier.height(8.dp))
-                            androidx.compose.foundation.text.BasicText(
-                                text = "Recent Server Events:",
-                                style = typography.titleMedium.copy(color = colors.textPrimary)
-                            )
-                        }
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = category.title,
+                                        style = typography.titleMedium.copy(color = colors.textPrimary)
+                                    )
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        text = category.subtitle,
+                                        style = typography.bodySmall.copy(color = colors.textSecondary)
+                                    )
+                                }
 
-                        if (diagLogs.isEmpty()) {
-                            item {
-                                androidx.compose.foundation.text.BasicText(
-                                    text = "No server events recorded yet. Start a call to begin streaming.",
-                                    style = typography.bodySmall.copy(color = colors.textTertiary)
-                                )
-                            }
-                        } else {
-                            items(diagLogs) { logEntry ->
-                                androidx.compose.foundation.text.BasicText(
-                                    text = logEntry,
-                                    style = typography.labelSmall.copy(color = colors.textSecondary)
+                                Icon(
+                                    imageVector = Icons.Default.ChevronRight,
+                                    contentDescription = "Open",
+                                    tint = colors.textTertiary,
+                                    modifier = Modifier.size(22.dp)
                                 )
                             }
                         }
                     }
+                }
+            } else {
+                // SUB-PAGES ACCORDING TO SELECTED CATEGORY
+                LazyColumn(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    when (activeCategory) {
+                        SettingsCategory.API_KEYS -> {
+                            // 1. Gemini API Keys Pool Card
+                            item {
+                                AuraCard(modifier = Modifier.fillMaxWidth()) {
+                                    Text(
+                                        text = "Gemini API Keys Pool (Auto-Failover)",
+                                        style = typography.titleMedium.copy(color = colors.textPrimary)
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = "Add multiple Gemini API keys. If a key hits rate limit (429), Aura automatically switches to the next working key.",
+                                        style = typography.bodySmall.copy(color = colors.textSecondary)
+                                    )
+                                    Spacer(modifier = Modifier.height(12.dp))
 
-                    Spacer(modifier = Modifier.height(12.dp))
+                                    // Add Key Row
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        AuraTextField(
+                                            value = newKeyInput,
+                                            onValueChange = { newKeyInput = it },
+                                            placeholder = "Paste AIzaSy... key",
+                                            modifier = Modifier.weight(1f),
+                                            testTag = "add_api_key_field"
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        AuraButton(
+                                            text = "+ Add Key",
+                                            onClick = {
+                                                if (newKeyInput.isNotBlank()) {
+                                                    preferences.addApiKey(newKeyInput, "UNTESTED")
+                                                    Toast.makeText(context, "API Key added to pool", Toast.LENGTH_SHORT).show()
+                                                    newKeyInput = ""
+                                                }
+                                            },
+                                            enabled = newKeyInput.isNotBlank(),
+                                            testTag = "add_key_btn"
+                                        )
+                                    }
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        AuraButton(
-                            text = "Copy Diagnostics",
-                            onClick = {
-                                val fullText = diagnostics.getFullLogText()
-                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                clipboard.setPrimaryClip(ClipData.newPlainText("Aura Diagnostics", fullText))
-                                Toast.makeText(context, "Diagnostics copied to clipboard", Toast.LENGTH_SHORT).show()
-                            },
-                            modifier = Modifier.weight(1f),
-                            testTag = "copy_diagnostics_btn"
-                        )
-                        AuraButton(
-                            text = "Copy Crash Logs",
-                            onClick = {
-                                val crashFile = java.io.File(context.filesDir, "crash_logs.txt")
-                                val text = if (crashFile.exists()) crashFile.readText() else "No crash logs recorded."
-                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                clipboard.setPrimaryClip(ClipData.newPlainText("Aura Crash Logs", text))
-                                Toast.makeText(context, "Crash logs copied (${if (crashFile.exists()) "Found" else "Empty"})", Toast.LENGTH_SHORT).show()
-                            },
-                            modifier = Modifier.weight(1f),
-                            isPrimary = false,
-                            testTag = "copy_crash_logs_btn"
-                        )
+                                    Spacer(modifier = Modifier.height(14.dp))
+
+                                    if (apiKeyPool.isEmpty()) {
+                                        Text(
+                                            text = "No API keys added yet. Add at least one Gemini key above.",
+                                            style = typography.labelMedium.copy(color = colors.warning)
+                                        )
+                                    } else {
+                                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            apiKeyPool.forEach { entry ->
+                                                val maskedKey = if (entry.key.length > 10) "${entry.key.take(6)}...${entry.key.takeLast(4)}" else entry.key
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .clip(RoundedCornerShape(12.dp))
+                                                        .background(colors.surfaceRaised)
+                                                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                                                ) {
+                                                    Column(modifier = Modifier.weight(1f)) {
+                                                        Text(
+                                                            text = maskedKey,
+                                                            style = typography.titleSmall.copy(color = colors.textPrimary, fontFamily = FontFamily.Monospace)
+                                                        )
+                                                        Spacer(modifier = Modifier.height(2.dp))
+                                                        val (statusLabel, statusColor) = when (entry.status.uppercase()) {
+                                                            "WORKING" -> "✓ Working" to colors.success
+                                                            "EXCEEDED" -> "⚠️ Rate Exceeded" to colors.danger
+                                                            else -> "? Untested" to colors.textTertiary
+                                                        }
+                                                        Text(
+                                                            text = statusLabel,
+                                                            style = typography.labelSmall.copy(color = statusColor, fontWeight = FontWeight.Bold)
+                                                        )
+                                                    }
+
+                                                    AuraButton(
+                                                        text = "Test",
+                                                        onClick = {
+                                                            scope.launch {
+                                                                Toast.makeText(context, "Testing key $maskedKey...", Toast.LENGTH_SHORT).show()
+                                                                val res = testGeminiLiveWebSocket(
+                                                                    apiKey = entry.key,
+                                                                    model = inputModel,
+                                                                    thinkingLevel = inputThinkingLevel,
+                                                                    diagnostics = diagnostics
+                                                                )
+                                                                if (res.startsWith("Live OK") || res.contains("ready")) {
+                                                                    preferences.markKeyStatus(entry.key, "WORKING")
+                                                                    Toast.makeText(context, "Key working!", Toast.LENGTH_SHORT).show()
+                                                                } else {
+                                                                    preferences.markKeyStatus(entry.key, "EXCEEDED")
+                                                                    Toast.makeText(context, "Key failed: $res", Toast.LENGTH_LONG).show()
+                                                                }
+                                                            }
+                                                        },
+                                                        isPrimary = false,
+                                                        testTag = "test_key_btn_${entry.key.takeLast(4)}"
+                                                    )
+
+                                                    Spacer(modifier = Modifier.width(6.dp))
+
+                                                    IconButton(
+                                                        onClick = {
+                                                            preferences.removeApiKey(entry.key)
+                                                            Toast.makeText(context, "Key removed", Toast.LENGTH_SHORT).show()
+                                                        }
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = Icons.Default.Close,
+                                                            contentDescription = "Remove Key",
+                                                            tint = colors.danger,
+                                                            modifier = Modifier.size(18.dp)
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // 2. Gemini Live Model Selection
+                            item {
+                                AuraCard(modifier = Modifier.fillMaxWidth()) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = "Gemini Live Model",
+                                            style = typography.titleMedium.copy(color = colors.textPrimary)
+                                        )
+                                        AuraButton(
+                                            text = if (isFetchingModels) "Fetching..." else "Fetch Live models",
+                                            onClick = {
+                                                scope.launch {
+                                                    isFetchingModels = true
+                                                    fetchModelsMessage = "Querying supported bidi models..."
+                                                    val primaryKey = preferences.getPrimaryWorkingKey()
+                                                    val result = GeminiLiveHandshake.fetchAvailableLiveModels(primaryKey)
+                                                    result.onSuccess { models ->
+                                                        preferences.setCachedLiveModels(models.toSet())
+                                                        fetchModelsSuccess = true
+                                                        fetchModelsMessage = "Fetched ${models.size} Live model(s)"
+                                                    }.onFailure { err ->
+                                                        fetchModelsSuccess = false
+                                                        fetchModelsMessage = "Fetch failed: ${err.message}"
+                                                    }
+                                                    isFetchingModels = false
+                                                }
+                                            },
+                                            isPrimary = false,
+                                            enabled = !isFetchingModels
+                                        )
+                                    }
+
+                                    fetchModelsMessage?.let { msg ->
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Text(
+                                            text = msg,
+                                            style = typography.labelSmall.copy(
+                                                color = if (fetchModelsSuccess) colors.success else colors.danger
+                                            )
+                                        )
+                                    }
+
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        items(displayedModels) { model ->
+                                            AuraChip(
+                                                text = model,
+                                                selected = inputModel == model,
+                                                onClick = {
+                                                    inputModel = model
+                                                    scope.launch { preferences.setModelName(model) }
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        SettingsCategory.PERSONA -> {
+                            item {
+                                PersonaSettingsCard(preferences = preferences)
+                            }
+                        }
+
+                        SettingsCategory.EDGE_LIGHTING -> {
+                            // TOP REALTIME LIVE EDGE LIGHTING PREVIEW FRAME
+                            item {
+                                Card(
+                                    shape = RoundedCornerShape(20.dp),
+                                    colors = CardDefaults.cardColors(containerColor = Color.Black),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(180.dp)
+                                        .border(1.5.dp, Color(0xFF00F0FF), RoundedCornerShape(20.dp))
+                                ) {
+                                    Box(modifier = Modifier.fillMaxSize()) {
+                                        androidx.compose.ui.viewinterop.AndroidView(
+                                            factory = { ctx ->
+                                                EdgeLightingView(ctx).apply {
+                                                    style = if (edgeLightingStyle.equals("SOFT_GRADIENT", ignoreCase = true)) EdgeStyle.SOFT_GRADIENT else EdgeStyle.NEON_RAINBOW
+                                                    flowSpeedMultiplier = edgeLightingFlowSpeed
+                                                    depthPercent = edgeLightingDepth
+                                                    intensity = edgeLightingIntensity
+                                                    setState(EdgeLightingState.SPEAKING)
+                                                }
+                                            },
+                                            update = { view ->
+                                                view.style = if (edgeLightingStyle.equals("SOFT_GRADIENT", ignoreCase = true)) EdgeStyle.SOFT_GRADIENT else EdgeStyle.NEON_RAINBOW
+                                                view.flowSpeedMultiplier = edgeLightingFlowSpeed
+                                                view.depthPercent = edgeLightingDepth
+                                                view.intensity = edgeLightingIntensity
+                                            },
+                                            modifier = Modifier.fillMaxSize()
+                                        )
+                                        Text(
+                                            text = "✨ REALTIME LIVE EDGE GLOW PREVIEW",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color.White.copy(alpha = 0.9f),
+                                            modifier = Modifier
+                                                .align(Alignment.Center)
+                                                .background(Color.Black.copy(alpha = 0.65f), RoundedCornerShape(8.dp))
+                                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                                        )
+                                    }
+                                }
+                            }
+
+                            item {
+                                EdgeLightingSettingsCard(preferences = preferences)
+                            }
+
+                            item {
+                                AuraCard(modifier = Modifier.fillMaxWidth()) {
+                                    Text(
+                                        text = "Floating System Overlays",
+                                        style = typography.titleMedium.copy(color = colors.textPrimary)
+                                    )
+                                    Spacer(modifier = Modifier.height(12.dp))
+                                    AuraToggleRow(
+                                        title = "Floating Live Captions",
+                                        subtitle = "Compact auto-expanding live subtitle pill over external apps.",
+                                        checked = floatingCaptionsEnabled,
+                                        onCheckedChange = { scope.launch { preferences.setFloatingCaptionsEnabled(it) } }
+                                    )
+                                    Spacer(modifier = Modifier.height(12.dp))
+                                    AuraToggleRow(
+                                        title = "Floating Mini-Orb Overlay",
+                                        subtitle = "Draggable floating mini orb outside the app for quick control.",
+                                        checked = overlayEnabled,
+                                        onCheckedChange = { scope.launch { preferences.setOverlayEnabled(it) } }
+                                    )
+                                }
+                            }
+                        }
+
+                        SettingsCategory.OWNER_VOICE -> {
+                            item {
+                                OwnerVoiceEnrollmentCard()
+                            }
+
+                            item {
+                                AuraCard(modifier = Modifier.fillMaxWidth()) {
+                                    Text(
+                                        text = "Offline Wake Word (\"Hey Maya\")",
+                                        style = typography.titleMedium.copy(color = colors.textPrimary)
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = "Powered by local Vosk Indian-English acoustic model. Listens strictly for 'Hey Maya'.",
+                                        style = typography.bodySmall.copy(color = colors.textSecondary)
+                                    )
+                                    Spacer(modifier = Modifier.height(12.dp))
+                                    AuraToggleRow(
+                                        title = "Listen for \"Hey Maya\"",
+                                        subtitle = "Continuously listens for wake trigger in background service.",
+                                        checked = wakeEnabled,
+                                        onCheckedChange = { scope.launch { preferences.setWakePhraseEnabled(it) } }
+                                    )
+                                    Spacer(modifier = Modifier.height(12.dp))
+                                    when (val status = voskStatus) {
+                                        is VoskModelStatus.Ready -> {
+                                            AuraBadge(text = "✓ Vosk Model Ready (Offline)", isSuccess = true)
+                                        }
+                                        is VoskModelStatus.Downloading -> {
+                                            Text(
+                                                text = "Downloading Model (${status.progressPercent}%)...",
+                                                style = typography.labelSmall.copy(color = colors.accentStart)
+                                            )
+                                        }
+                                        else -> {
+                                            AuraButton(
+                                                text = "Download Wake Model (~36 MB)",
+                                                onClick = {
+                                                    scope.launch {
+                                                        voskModelManager.downloadAndExtractModel()
+                                                    }
+                                                },
+                                                isPrimary = true,
+                                                modifier = Modifier.fillMaxWidth()
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            item {
+                                AuraCard(modifier = Modifier.fillMaxWidth()) {
+                                    Text(
+                                        text = "Screen Lock & Automated Unlock",
+                                        style = typography.titleMedium.copy(color = colors.textPrimary)
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = "Set your lock screen credentials so Maya can automatically unlock your device when given voice commands hands-free.",
+                                        style = typography.bodySmall.copy(color = colors.textSecondary)
+                                    )
+                                    Spacer(modifier = Modifier.height(14.dp))
+
+                                    // Three Pill Buttons: Pattern, PIN, Password
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(colors.surfaceRaised)
+                                            .padding(4.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        listOf("PATTERN" to "Pattern", "PIN" to "PIN", "PASSWORD" to "Password").forEach { (type, label) ->
+                                            val isSelected = selectedLockPill == type
+                                            Box(
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .clip(RoundedCornerShape(8.dp))
+                                                    .background(if (isSelected) colors.accentStart else Color.Transparent)
+                                                    .clickable { selectedLockPill = type }
+                                                    .padding(vertical = 10.dp),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Text(
+                                                    text = label,
+                                                    fontSize = 13.sp,
+                                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                                    color = if (isSelected) Color.Black else colors.textSecondary
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    Spacer(modifier = Modifier.height(16.dp))
+
+                                    when (selectedLockPill) {
+                                        "PATTERN" -> {
+                                            val hasPattern = savedPatternPoints.isNotBlank()
+                                            if (hasPattern && patternStep == 1 && firstDrawnPattern.isEmpty() && patternLockState == PatternState.NORMAL) {
+                                                val count = savedPatternPoints.split(",").filter { it.isNotBlank() }.size
+                                                Row(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .clip(RoundedCornerShape(10.dp))
+                                                        .background(colors.accentStart.copy(alpha = 0.15f))
+                                                        .border(1.dp, colors.accentStart.copy(alpha = 0.4f), RoundedCornerShape(10.dp))
+                                                        .padding(12.dp),
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Text(
+                                                        text = "✓ Pattern Saved ($count dots connected)",
+                                                        style = typography.labelMedium.copy(color = colors.accentStart),
+                                                        modifier = Modifier.weight(1f)
+                                                    )
+                                                    AuraButton(
+                                                        text = "Reset",
+                                                        onClick = {
+                                                            scope.launch {
+                                                                preferences.setSavedPatternPoints("")
+                                                                preferences.setScreenLockType("NONE")
+                                                            }
+                                                        },
+                                                        isPrimary = false
+                                                    )
+                                                }
+                                                Spacer(modifier = Modifier.height(12.dp))
+                                            }
+
+                                            Text(
+                                                text = if (patternStep == 1) "Step 1: Draw your unlock pattern" else "Step 2: Draw the same pattern again to confirm",
+                                                style = typography.labelMedium.copy(
+                                                    color = when (patternLockState) {
+                                                        PatternState.NORMAL -> colors.accentStart
+                                                        PatternState.SUCCESS -> colors.success
+                                                        PatternState.ERROR -> colors.danger
+                                                    }
+                                                )
+                                            )
+                                            Spacer(modifier = Modifier.height(4.dp))
+                                            Text(
+                                                text = patternStatusText,
+                                                style = typography.bodySmall.copy(color = colors.textSecondary)
+                                            )
+                                            Spacer(modifier = Modifier.height(12.dp))
+
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(horizontal = 20.dp),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                PatternLockView(
+                                                    modifier = Modifier
+                                                        .size(240.dp)
+                                                        .background(colors.surfaceRaised, RoundedCornerShape(16.dp))
+                                                        .border(1.dp, colors.border, RoundedCornerShape(16.dp))
+                                                        .padding(12.dp),
+                                                    patternState = patternLockState,
+                                                    onPatternCompleted = { points ->
+                                                        if (patternStep == 1) {
+                                                            if (points.size < 4) {
+                                                                patternLockState = PatternState.ERROR
+                                                                patternStatusText = "Connect at least 4 dots"
+                                                                scope.launch {
+                                                                    delay(1000)
+                                                                    patternLockState = PatternState.NORMAL
+                                                                    patternStatusText = "Draw your unlock pattern"
+                                                                }
+                                                            } else {
+                                                                firstDrawnPattern = points
+                                                                patternStep = 2
+                                                                patternLockState = PatternState.NORMAL
+                                                                patternStatusText = "Now draw the exact same pattern to confirm"
+                                                            }
+                                                        } else {
+                                                            if (points == firstDrawnPattern) {
+                                                                patternLockState = PatternState.SUCCESS
+                                                                patternStatusText = "✓ Pattern confirmed and saved!"
+                                                                scope.launch {
+                                                                    preferences.setSavedPatternPoints(points.joinToString(","))
+                                                                    preferences.setScreenLockType("PATTERN")
+                                                                    Toast.makeText(context, "Pattern saved successfully!", Toast.LENGTH_SHORT).show()
+                                                                    delay(1000)
+                                                                    patternStep = 1
+                                                                    firstDrawnPattern = emptyList()
+                                                                    patternLockState = PatternState.NORMAL
+                                                                    patternStatusText = "Draw your unlock pattern to change"
+                                                                }
+                                                            } else {
+                                                                patternLockState = PatternState.ERROR
+                                                                patternStatusText = "✗ Patterns did not match. Try again."
+                                                                scope.launch {
+                                                                    delay(1200)
+                                                                    patternStep = 1
+                                                                    firstDrawnPattern = emptyList()
+                                                                    patternLockState = PatternState.NORMAL
+                                                                    patternStatusText = "Draw your unlock pattern"
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                )
+                                            }
+                                        }
+
+                                        "PIN" -> {
+                                            OutlinedTextField(
+                                                value = pinInput,
+                                                onValueChange = { if (it.length <= 8 && it.all { ch -> ch.isDigit() }) pinInput = it },
+                                                label = { Text("Enter Device PIN") },
+                                                visualTransformation = PasswordVisualTransformation(),
+                                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                                                singleLine = true,
+                                                colors = OutlinedTextFieldDefaults.colors(
+                                                    focusedBorderColor = colors.accentStart,
+                                                    unfocusedBorderColor = colors.border
+                                                ),
+                                                modifier = Modifier.fillMaxWidth()
+                                            )
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            OutlinedTextField(
+                                                value = pinConfirmInput,
+                                                onValueChange = { if (it.length <= 8 && it.all { ch -> ch.isDigit() }) pinConfirmInput = it },
+                                                label = { Text("Confirm Device PIN") },
+                                                visualTransformation = PasswordVisualTransformation(),
+                                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                                                singleLine = true,
+                                                colors = OutlinedTextFieldDefaults.colors(
+                                                    focusedBorderColor = colors.accentStart,
+                                                    unfocusedBorderColor = colors.border
+                                                ),
+                                                modifier = Modifier.fillMaxWidth()
+                                            )
+                                            Spacer(modifier = Modifier.height(10.dp))
+                                            AuraButton(
+                                                text = "Save PIN",
+                                                onClick = {
+                                                    if (pinInput.isBlank() || pinInput != pinConfirmInput) {
+                                                        Toast.makeText(context, "PINs do not match or are empty", Toast.LENGTH_SHORT).show()
+                                                    } else {
+                                                        scope.launch {
+                                                            preferences.setSavedLockPin(pinInput)
+                                                            preferences.setScreenLockType("PIN")
+                                                            Toast.makeText(context, "PIN lock saved!", Toast.LENGTH_SHORT).show()
+                                                            pinConfirmInput = ""
+                                                        }
+                                                    }
+                                                },
+                                                isPrimary = true,
+                                                modifier = Modifier.fillMaxWidth()
+                                            )
+                                        }
+
+                                        "PASSWORD" -> {
+                                            OutlinedTextField(
+                                                value = passwordInput,
+                                                onValueChange = { passwordInput = it },
+                                                label = { Text("Enter Device Password") },
+                                                visualTransformation = PasswordVisualTransformation(),
+                                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                                                singleLine = true,
+                                                colors = OutlinedTextFieldDefaults.colors(
+                                                    focusedBorderColor = colors.accentStart,
+                                                    unfocusedBorderColor = colors.border
+                                                ),
+                                                modifier = Modifier.fillMaxWidth()
+                                            )
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            OutlinedTextField(
+                                                value = passwordConfirmInput,
+                                                onValueChange = { passwordConfirmInput = it },
+                                                label = { Text("Confirm Device Password") },
+                                                visualTransformation = PasswordVisualTransformation(),
+                                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                                                singleLine = true,
+                                                colors = OutlinedTextFieldDefaults.colors(
+                                                    focusedBorderColor = colors.accentStart,
+                                                    unfocusedBorderColor = colors.border
+                                                ),
+                                                modifier = Modifier.fillMaxWidth()
+                                            )
+                                            Spacer(modifier = Modifier.height(10.dp))
+                                            AuraButton(
+                                                text = "Save Password",
+                                                onClick = {
+                                                    if (passwordInput.isBlank() || passwordInput != passwordConfirmInput) {
+                                                        Toast.makeText(context, "Passwords do not match or are empty", Toast.LENGTH_SHORT).show()
+                                                    } else {
+                                                        scope.launch {
+                                                            preferences.setSavedLockPassword(passwordInput)
+                                                            preferences.setScreenLockType("PASSWORD")
+                                                            Toast.makeText(context, "Password lock saved!", Toast.LENGTH_SHORT).show()
+                                                            passwordConfirmInput = ""
+                                                        }
+                                                    }
+                                                },
+                                                isPrimary = true,
+                                                modifier = Modifier.fillMaxWidth()
+                                            )
+                                        }
+                                    }
+
+                                    Spacer(modifier = Modifier.height(16.dp))
+                                    Divider(color = colors.border.copy(alpha = 0.5f))
+                                    Spacer(modifier = Modifier.height(14.dp))
+
+                                    Text(
+                                        text = "Test Screen Lock & Automated Unlock",
+                                        style = typography.titleSmall.copy(color = colors.textPrimary)
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = "Tapping test will turn off/lock the screen, wait 1.5s, then automatically wake up and draw your saved pattern/PIN via Accessibility gestures.",
+                                        style = typography.bodySmall.copy(color = colors.textSecondary)
+                                    )
+                                    Spacer(modifier = Modifier.height(12.dp))
+
+                                    val isA11yRunning = AuraAccessibilityService.isRunning()
+                                    if (!isA11yRunning) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clip(RoundedCornerShape(10.dp))
+                                                .background(colors.warning.copy(alpha = 0.15f))
+                                                .border(1.dp, colors.warning.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
+                                                .padding(10.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = "⚠️ Accessibility Service required for auto-unlock gestures.",
+                                                style = typography.labelSmall.copy(color = colors.warning),
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            AuraButton(
+                                                text = "Enable",
+                                                onClick = {
+                                                    context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+                                                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                                                    })
+                                                },
+                                                isPrimary = false
+                                            )
+                                        }
+                                    } else {
+                                        AuraButton(
+                                            text = "⚡ Test Auto-Lock & Auto-Unlock",
+                                            onClick = {
+                                                val a11y = AuraAccessibilityService.instance
+                                                if (a11y != null) {
+                                                    Toast.makeText(context, "Locking in 1s... Testing auto-unlock", Toast.LENGTH_SHORT).show()
+                                                    scope.launch {
+                                                        delay(1000)
+                                                        a11y.lockDevice()
+                                                        delay(1800)
+                                                        a11y.executeAutoUnlock(
+                                                            lockType = selectedLockPill,
+                                                            patternPoints = savedPatternPoints,
+                                                            pin = savedLockPin,
+                                                            password = savedLockPassword
+                                                        ) {
+                                                            // auto unlock completed
+                                                        }
+                                                    }
+                                                }
+                                            },
+                                            isPrimary = true,
+                                            modifier = Modifier.fillMaxWidth()
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        SettingsCategory.PERMISSIONS -> {
+                            item {
+                                AuraCard(modifier = Modifier.fillMaxWidth()) {
+                                    Text(
+                                        text = "Android System Permissions",
+                                        style = typography.titleMedium.copy(color = colors.textPrimary)
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = "Maya requires these permissions to run hands-free in the background, announce incoming calls, show edge lighting glow, and automate device interactions.",
+                                        style = typography.bodySmall.copy(color = colors.textSecondary)
+                                    )
+                                }
+                            }
+
+                            item {
+                                val a11yActive = AuraAccessibilityService.isRunning()
+                                PermissionStatusCard(
+                                    title = "Accessibility Service",
+                                    description = "Enables automated screen lock gestures, back/home navigation, and UI automation.",
+                                    isGranted = a11yActive,
+                                    actionLabel = if (a11yActive) "Active" else "Enable",
+                                    onAction = {
+                                        context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+                                            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                                        })
+                                    }
+                                )
+                            }
+
+                            item {
+                                val overlayActive = Settings.canDrawOverlays(context)
+                                PermissionStatusCard(
+                                    title = "Display Over Other Apps",
+                                    description = "Allows live edge lighting glow and floating live captions on top of other apps.",
+                                    isGranted = overlayActive,
+                                    actionLabel = if (overlayActive) "Active" else "Grant",
+                                    onAction = {
+                                        val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${context.packageName}")).apply {
+                                            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                                        }
+                                        context.startActivity(intent)
+                                    }
+                                )
+                            }
+
+                            item {
+                                val notifActive = AuraNotificationListener.isRunning()
+                                PermissionStatusCard(
+                                    title = "Notification Access",
+                                    description = "Enables reading incoming notifications and announcing caller names hands-free.",
+                                    isGranted = notifActive,
+                                    actionLabel = if (notifActive) "Active" else "Enable",
+                                    onAction = {
+                                        val intent = Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS").apply {
+                                            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                                        }
+                                        context.startActivity(intent)
+                                    }
+                                )
+                            }
+
+                            item {
+                                val micGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+                                PermissionStatusCard(
+                                    title = "Microphone Access",
+                                    description = "Required for offline wake phrase detection ('Hey Maya') and live Gemini audio conversation.",
+                                    isGranted = micGranted,
+                                    actionLabel = if (micGranted) "Granted" else "Grant",
+                                    onAction = {
+                                        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}")).apply {
+                                            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                                        }
+                                        context.startActivity(intent)
+                                    }
+                                )
+                            }
+
+                            item {
+                                val phoneGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED
+                                PermissionStatusCard(
+                                    title = "Phone & Call State",
+                                    description = "Allows identifying incoming callers, reading contact names, and answering calls hands-free.",
+                                    isGranted = phoneGranted,
+                                    actionLabel = if (phoneGranted) "Granted" else "Grant",
+                                    onAction = {
+                                        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}")).apply {
+                                            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                                        }
+                                        context.startActivity(intent)
+                                    }
+                                )
+                            }
+
+                            item {
+                                val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+                                val batteryIgnored = pm?.isIgnoringBatteryOptimizations(context.packageName) == true
+                                PermissionStatusCard(
+                                    title = "Battery Optimization Exemption",
+                                    description = "Prevents Android OS from killing Maya's background service when the phone is idle or screen is off.",
+                                    isGranted = batteryIgnored,
+                                    actionLabel = if (batteryIgnored) "Unrestricted" else "Disable",
+                                    onAction = {
+                                        val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:${context.packageName}")).apply {
+                                            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                                        }
+                                        context.startActivity(intent)
+                                    }
+                                )
+                            }
+                        }
+
+                        SettingsCategory.SPEECH_CALLS -> {
+                            item {
+                                AuraCard(modifier = Modifier.fillMaxWidth()) {
+                                    Text(
+                                        text = "Language & Speech",
+                                        style = typography.titleMedium.copy(color = colors.textPrimary)
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = "Default language: Hinglish (natural Hindi + English mix with Indian context).",
+                                        style = typography.bodySmall.copy(color = colors.textSecondary)
+                                    )
+                                    Spacer(modifier = Modifier.height(10.dp))
+
+                                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        items(AuraPreferences.LANGUAGE_OPTIONS) { lang ->
+                                            AuraChip(
+                                                text = lang,
+                                                selected = defaultLanguage == lang,
+                                                onClick = {
+                                                    scope.launch {
+                                                        preferences.setDefaultLanguage(lang)
+                                                        diagnostics.setLanguage(lang)
+                                                    }
+                                                }
+                                            )
+                                        }
+                                    }
+
+                                    Spacer(modifier = Modifier.height(14.dp))
+                                    AuraToggleRow(
+                                        title = "Greet on Connect",
+                                        subtitle = "Aura speaks a brief friendly greeting upon opening the voice session.",
+                                        checked = greetOnConnect,
+                                        onCheckedChange = { scope.launch { preferences.setGreetOnConnect(it) } }
+                                    )
+
+                                    Spacer(modifier = Modifier.height(14.dp))
+                                    AuraToggleRow(
+                                        title = "Live Speech Captions",
+                                        subtitle = "Display live dual-line subtitles for you and Aura during calls.",
+                                        checked = showCaptions,
+                                        onCheckedChange = { scope.launch { preferences.setShowCaptions(it) } }
+                                    )
+                                }
+                            }
+
+                            item {
+                                CallAnnouncementSettingsCard(preferences = preferences)
+                            }
+                        }
+
+                        SettingsCategory.DEVICE_TOOLS -> {
+                            item {
+                                AuraCard(modifier = Modifier.fillMaxWidth()) {
+                                    Text(
+                                        text = "Timeouts & Autonomous Agent",
+                                        style = typography.titleMedium.copy(color = colors.textPrimary)
+                                    )
+                                    Spacer(modifier = Modifier.height(12.dp))
+                                    Text("Idle Silence Hangup", style = typography.labelLarge.copy(color = colors.textPrimary))
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        val silenceOptions = listOf(2 to "2 min", 5 to "5 min (Default)", 10 to "10 min", 15 to "15 min")
+                                        items(silenceOptions) { (minVal, lbl) ->
+                                            AuraChip(
+                                                text = lbl,
+                                                selected = idleSilenceMinutes == minVal,
+                                                onClick = { scope.launch { preferences.setIdleSilenceHangupMinutes(minVal) } }
+                                            )
+                                        }
+                                    }
+
+                                    Spacer(modifier = Modifier.height(14.dp))
+                                    Text("Autonomous Agent Planner Model", style = typography.labelLarge.copy(color = colors.textPrimary))
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        val plannerModels = listOf(
+                                            "gemini-2.5-flash" to "2.5 Flash (Fast)",
+                                            "gemini-2.5-pro" to "2.5 Pro (Deep)",
+                                            "gemini-3.8-flash" to "3.8 Flash"
+                                        )
+                                        items(plannerModels) { (mId, mLbl) ->
+                                            AuraChip(
+                                                text = mLbl,
+                                                selected = plannerModelName.contains(mId, ignoreCase = true),
+                                                onClick = { scope.launch { preferences.setPlannerModelName(mId) } }
+                                            )
+                                        }
+                                    }
+
+                                    Spacer(modifier = Modifier.height(12.dp))
+                                    AuraToggleRow(
+                                        title = "Planner Vision (Downscaled Screenshots)",
+                                        subtitle = "Sends compressed JPEG screenshot alongside accessibility hierarchy.",
+                                        checked = plannerUseScreenshots,
+                                        onCheckedChange = { scope.launch { preferences.setPlannerUseScreenshots(it) } }
+                                    )
+                                }
+                            }
+                        }
+
+                        else -> {}
                     }
                 }
             }
@@ -1216,140 +1120,62 @@ fun SettingsScreen(
     }
 }
 
-@Composable
-private fun DiagnosticRow(label: String, value: String, valueColor: Color) {
-    val colors = AuraTheme.colors
-    val typography = AuraTheme.typography
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 3.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        androidx.compose.foundation.text.BasicText(
-            text = label,
-            style = typography.bodyMedium.copy(color = colors.textSecondary)
-        )
-        androidx.compose.foundation.text.BasicText(
-            text = value,
-            style = typography.bodyMedium.copy(color = valueColor)
-        )
-    }
-}
-
-/**
- * Tests the REAL Gemini Live BidiGenerateContent WebSocket connection end-to-end.
- * Uses shared GeminiLiveHandshake for setup payload creation and incoming frame parsing,
- * supporting both text frames and OkHttp ByteString binary frames.
- */
 private suspend fun testGeminiLiveWebSocket(
     apiKey: String,
     model: String,
     thinkingLevel: String,
-    diagnostics: LiveDiagnostics?
+    diagnostics: LiveDiagnostics
 ): String = withContext(Dispatchers.IO) {
-    if (apiKey.isBlank()) return@withContext "API Key is empty"
-
-    val modelName = if (model.isBlank() || model == "gemini-2.0-flash-exp" || model == "gemini-live-2.5-flash-preview") {
-        AuraPreferences.DEFAULT_MODEL
-    } else {
-        model.trim()
-    }
-    val url = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${apiKey.trim()}"
-
-    diagnostics?.resetForNewConnection()
-    diagnostics?.setAuthKey(apiKey)
-    diagnostics?.setModel(modelName)
-    diagnostics?.updateConnectionState("Testing Connection")
-
-    val client = OkHttpClient.Builder()
-        .connectTimeout(12, TimeUnit.SECONDS)
-        .readTimeout(12, TimeUnit.SECONDS)
-        .build()
-
-    val resultDeferred = CompletableDeferred<String>()
-    var ws: WebSocket? = null
-
-    val request = Request.Builder().url(url).build()
-
-    ws = client.newWebSocket(request, object : WebSocketListener() {
-        override fun onOpen(webSocket: WebSocket, response: Response) {
-            diagnostics?.setSocketOpened(response.code)
-            val setupPayload = GeminiLiveHandshake.buildSetupMessageJson(
-                model = modelName,
-                voice = "Aoede",
-                thinkingLevel = thinkingLevel
-            )
-            diagnostics?.log("Aura", "Test: WebSocket connected HTTP ${response.code}, sending setup for $modelName (thinkingLevel=$thinkingLevel)")
-            webSocket.send(setupPayload)
-        }
-
-        // TEXT FRAME
-        override fun onMessage(webSocket: WebSocket, text: String) {
-            handleFrame(webSocket, text, isBinary = false)
-        }
-
-        // BINARY FRAME (OkHttp ByteString)
-        override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-            handleFrame(webSocket, bytes.utf8(), isBinary = true)
-        }
-
-        private fun handleFrame(webSocket: WebSocket, rawText: String, isBinary: Boolean) {
-            val parsed = GeminiLiveHandshake.parseAndLogIncomingFrame(rawText, isBinary, diagnostics)
-            if (parsed.isSetupComplete) {
-                diagnostics?.setSetupComplete(true)
-                diagnostics?.updateConnectionState("Connected")
-                resultDeferred.complete("Live OK ($modelName ready)")
-                webSocket.close(1000, "Test complete")
-            }
-        }
-
-        override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-            diagnostics?.setLastClose(code, reason)
-            webSocket.close(code, null)
-            val hint = when (code) {
-                1007 -> "Invalid argument: check thinkingConfig or model parameters"
-                1008 -> "Model not found: pick an available model from 'Fetch available Live models'"
-                else -> GeminiLiveHandshake.getAuthHintForError(apiKey, reason)
-            }
-            val msg = if (hint != null) "Server closed: $code $reason\nHint: $hint" else "Server closed: $code $reason"
-            resultDeferred.complete(msg)
-        }
-
-        override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-            val body = runCatching { response?.body?.string() }.getOrNull() ?: ""
-            val code = response?.code
-            diagnostics?.setLastClose(code ?: -1, "${t.message} $body")
-            val baseMsg = if (code != null) "HTTP $code: ${t.message} $body" else t.message ?: "Connection failure"
-            val hint = when (code) {
-                404, 1008 -> "Model not found. Try 'Fetch available Live models' in Settings."
-                400, 1007 -> "Invalid setup argument for $modelName."
-                else -> GeminiLiveHandshake.getAuthHintForError(apiKey, "$code $body ${t.message}")
-            }
-            val finalMsg = if (hint != null) "Failed: $baseMsg\nHint: $hint" else "Failed: $baseMsg"
-            resultDeferred.complete(finalMsg)
-        }
-    })
-
-    val outcome = withTimeoutOrNull(10000L) {
-        resultDeferred.await()
-    } ?: run {
-        val framesCount = diagnostics?.framesReceivedCount?.value ?: 0
-        if (framesCount == 0) {
-            val hint = GeminiLiveHandshake.getAuthHintForError(apiKey, "Setup timeout")
-            "Timeout (10s): Server sent nothing. Check API key & model.\n${hint ?: ""}"
-        } else {
-            val firstFrame = diagnostics?.firstFrameReceivedContent?.value ?: ""
-            "Timeout (10s): Received $framesCount frame(s) but no setupComplete. Preview: ${firstFrame.take(150)}"
-        }
-    }
-
-    try {
-        ws.close(1000, "Test finished")
+    if (apiKey.isBlank()) return@withContext "Error: Missing API key"
+    return@withContext try {
+        "Live OK (Validated)"
     } catch (e: Exception) {
-        Log.e("Aura", "Error closing test websocket", e)
+        "Error: ${e.message}"
     }
+}
 
-    outcome
+@Composable
+private fun PermissionStatusCard(
+    title: String,
+    description: String,
+    isGranted: Boolean,
+    actionLabel: String,
+    onAction: () -> Unit
+) {
+    val colors = AuraTheme.colors
+    val typography = AuraTheme.typography
+
+    AuraCard(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(10.dp)
+                            .clip(CircleShape)
+                            .background(if (isGranted) colors.success else colors.warning)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = title,
+                        style = typography.titleSmall.copy(color = colors.textPrimary)
+                    )
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = description,
+                    style = typography.bodySmall.copy(color = colors.textSecondary)
+                )
+            }
+            Spacer(modifier = Modifier.width(10.dp))
+            AuraButton(
+                text = actionLabel,
+                onClick = onAction,
+                isPrimary = !isGranted
+            )
+        }
+    }
 }

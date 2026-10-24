@@ -8,7 +8,6 @@ import android.provider.Settings
 import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
-import android.view.View
 import android.view.WindowManager
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -21,7 +20,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.unit.dp
 import com.example.service.AuraForegroundService
 import com.example.ui.components.AuraOrb
@@ -37,41 +35,80 @@ class OverlayManager(private val context: Context) {
     }
 
     private val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-    private var overlayView: View? = null
+    private var overlayHost: ComposeOverlayHost? = null
     private var isOverlayShowing = false
 
     private val currentCaptionText = MutableStateFlow("")
 
     fun updateCaption(text: String) {
-        currentCaptionText.value = text
+        OverlayGuard.run("mini_orb", context) {
+            currentCaptionText.value = text
+        }
     }
 
     @SuppressLint("ClickableViewAccessibility")
     fun showOverlay() {
-        if (isOverlayShowing || !Settings.canDrawOverlays(context)) return
+        OverlayGuard.run("mini_orb", context) {
+            if (isOverlayShowing || !Settings.canDrawOverlays(context)) return@run
 
-        val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-        } else {
-            @Suppress("DEPRECATION")
-            WindowManager.LayoutParams.TYPE_PHONE
-        }
+            val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+            } else {
+                @Suppress("DEPRECATION")
+                WindowManager.LayoutParams.TYPE_PHONE
+            }
 
-        val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            layoutType,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.TOP or Gravity.START
-            x = 80
-            y = 300
-        }
+            val params = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                layoutType,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                gravity = Gravity.TOP or Gravity.START
+                x = 80
+                y = 300
+            }
 
-        val composeView = ComposeView(context).apply {
-            setContent {
+            // Create or reuse host
+            val host = ComposeOverlayHost(context, windowManager)
+            overlayHost = host
+
+            // Handle touch dragging
+            var initialX = 0
+            var initialY = 0
+            var initialTouchX = 0f
+            var initialTouchY = 0f
+
+            val touchListener = android.view.View.OnTouchListener { view, event ->
+                when (event.action) {
+                    MotionEvent.ACTION_DOWN -> {
+                        initialX = params.x
+                        initialY = params.y
+                        initialTouchX = event.rawX
+                        initialTouchY = event.rawY
+                        true
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        params.x = initialX + (event.rawX - initialTouchX).toInt()
+                        params.y = initialY + (event.rawY - initialTouchY).toInt()
+                        host.updateLayout(params)
+                        true
+                    }
+                    MotionEvent.ACTION_UP -> {
+                        val diffX = abs(event.rawX - initialTouchX)
+                        val diffY = abs(event.rawY - initialTouchY)
+                        if (diffX < 10 && diffY < 10) {
+                            view.performClick()
+                        }
+                        true
+                    }
+                    else -> false
+                }
+            }
+
+            val attached = host.attach(params, touchListener) {
                 AuraTheme {
                     val service = AuraForegroundService.currentService
                     val isCallActive by AuraForegroundService.isCallActive.collectAsState()
@@ -133,64 +170,24 @@ class OverlayManager(private val context: Context) {
                     }
                 }
             }
-        }
 
-        // Handle touch dragging
-        var initialX = 0
-        var initialY = 0
-        var initialTouchX = 0f
-        var initialTouchY = 0f
-
-        composeView.setOnTouchListener { view, event ->
-            when (event.action) {
-                MotionEvent.ACTION_DOWN -> {
-                    initialX = params.x
-                    initialY = params.y
-                    initialTouchX = event.rawX
-                    initialTouchY = event.rawY
-                    true
-                }
-                MotionEvent.ACTION_MOVE -> {
-                    params.x = initialX + (event.rawX - initialTouchX).toInt()
-                    params.y = initialY + (event.rawY - initialTouchY).toInt()
-                    try {
-                        windowManager.updateViewLayout(composeView, params)
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Error updating overlay layout: ${e.message}", e)
-                    }
-                    true
-                }
-                MotionEvent.ACTION_UP -> {
-                    val diffX = abs(event.rawX - initialTouchX)
-                    val diffY = abs(event.rawY - initialTouchY)
-                    if (diffX < 10 && diffY < 10) {
-                        view.performClick()
-                    }
-                    true
-                }
-                else -> false
+            if (attached) {
+                isOverlayShowing = true
+                Log.i(TAG, "Mini-orb overlay shown safely via ComposeOverlayHost")
+            } else {
+                isOverlayShowing = false
+                overlayHost = null
             }
-        }
-
-        try {
-            windowManager.addView(composeView, params)
-            overlayView = composeView
-            isOverlayShowing = true
-            Log.i(TAG, "Mini-orb overlay shown")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to show mini-orb overlay: ${e.message}", e)
         }
     }
 
     fun hideOverlay() {
-        if (!isOverlayShowing || overlayView == null) return
-        try {
-            windowManager.removeView(overlayView)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error removing mini-orb overlay: ${e.message}", e)
+        OverlayGuard.run("mini_orb", context) {
+            if (!isOverlayShowing || overlayHost == null) return@run
+            overlayHost?.detach()
+            overlayHost = null
+            isOverlayShowing = false
+            Log.i(TAG, "Mini-orb overlay safely hidden")
         }
-        overlayView = null
-        isOverlayShowing = false
-        Log.i(TAG, "Mini-orb overlay hidden")
     }
 }

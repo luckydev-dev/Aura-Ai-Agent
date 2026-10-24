@@ -7,10 +7,12 @@ import com.example.AuraApplication
 import com.example.core.audio.AudioTrackPlayer
 import com.example.core.memory.MemoryRepository
 import com.example.core.tools.ToolRegistry
+import com.example.core.settings.AuraPreferences
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import okhttp3.*
 import okio.ByteString
 import org.json.JSONArray
@@ -30,7 +32,8 @@ sealed class LiveConnectionState {
 class GeminiLiveClient(
     private val toolRegistry: ToolRegistry,
     private val audioPlayer: AudioTrackPlayer,
-    private val memoryRepository: MemoryRepository? = null
+    private val memoryRepository: MemoryRepository? = null,
+    private val preferences: AuraPreferences? = null
 ) {
     companion object {
         private const val TAG = "Aura"
@@ -374,6 +377,22 @@ class GeminiLiveClient(
                 diagnostics?.setLastClose(code, errSummary)
                 diagnostics?.log(TAG, "Failure: $errSummary")
 
+                // Check for 429 / Quota Exceeded / Rate Limit and failover to next key
+                if (code == 429 || code == 403 || code == 401 || errSummary.contains("RESOURCE_EXHAUSTED", ignoreCase = true) || errSummary.contains("quota", ignoreCase = true)) {
+                    Log.w(TAG, "Rate limit / Quota exceeded on key ${currentApiKey.take(6)}... Marking EXCEEDED and rotating key.")
+                    if (currentApiKey.isNotBlank()) {
+                        preferences?.markKeyStatus(currentApiKey, "EXCEEDED")
+                    }
+                    val nextKey = preferences?.getPrimaryWorkingKey()
+                    if (!nextKey.isNullOrBlank() && nextKey != currentApiKey) {
+                        Log.i(TAG, "Failover: Retrying with next API key in pool: ${nextKey.take(6)}...")
+                        currentApiKey = nextKey
+                        reconnectAttempt = 0
+                        startWebSocketConnection(backgroundSwap = true)
+                        return
+                    }
+                }
+
                 // Check for terminal HTTP response
                 if (code in listOf(400, 401, 403, 404)) {
                     val classification = LiveSessionPolicy.classifyClose(code, errSummary, isSetupComplete, currentApiKey)
@@ -452,12 +471,17 @@ class GeminiLiveClient(
             diagnostics?.resetReconnectCount()
             Log.i(TAG, "Setup complete confirmed on active connection #$activeConnectionId.")
 
+            if (currentApiKey.isNotBlank()) {
+                preferences?.markKeyStatus(currentApiKey, "WORKING")
+            }
+
             // Send initial friendly greeting only once on the first connect of a call
             if (greetOnConnect && !hasDoneInitialGreeting) {
                 hasDoneInitialGreeting = true
                 scope?.launch {
                     delay(300L)
-                    sendTextMessage("(Aura session connected. Greet Lucky aka Sohil warmly in Hinglish with one short sentence, e.g. 'Namaste Lucky bhai! Main Aura hoon. Aaj kya help chahiye?')")
+                    val owner = preferences?.ownerName?.first()?.ifBlank { "Boss" } ?: "Boss"
+                    sendTextMessage("(Aura session connected. Greet $owner warmly in Hinglish with one short sentence, e.g. 'Haan $owner, bolo kya help chahiye?')")
                 }
             }
             return

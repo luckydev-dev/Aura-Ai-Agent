@@ -2,12 +2,18 @@ package com.example
 
 import android.app.Activity
 import android.app.Application
+import android.content.Context
 import android.os.Bundle
 import android.util.Log
+import androidx.compose.runtime.mutableStateOf
 import com.example.core.lifecycle.AppForegroundState
 import com.example.core.live.LiveDiagnostics
+import com.example.core.settings.AuraPreferences
 import com.example.ui.overlay.OverlayManager
-import com.topjohnwu.superuser.Shell
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import java.io.File
 import java.io.PrintWriter
 import java.io.StringWriter
@@ -29,12 +35,19 @@ class AuraApplication : Application(), Application.ActivityLifecycleCallbacks {
 
         val isAppInForeground: Boolean
             get() = AppForegroundState.current
+
+        // Crash breaker & Safe Mode state
+        val isSafeMode = mutableStateOf(false)
+        val lastCrashReport = mutableStateOf<String?>(null)
     }
+
+    private val appScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     override fun onCreate() {
         super.onCreate()
         instance = this
 
+        checkCrashHistoryAndSafeMode()
         setupCrashHandler()
         registerActivityLifecycleCallbacks(this)
 
@@ -42,6 +55,42 @@ class AuraApplication : Application(), Application.ActivityLifecycleCallbacks {
         com.example.core.root.RootManager.ensureConfigured()
 
         overlayManager = OverlayManager(this)
+    }
+
+    private fun checkCrashHistoryAndSafeMode() {
+        val prefs = getSharedPreferences("aura_crash_meta", Context.MODE_PRIVATE)
+        val lastTrace = prefs.getString("last_crash_trace", null)
+        val lastTime = prefs.getLong("last_crash_timestamp", 0L)
+        val isSafe = prefs.getBoolean("safe_mode_active", false)
+
+        if (!lastTrace.isNullOrBlank() && System.currentTimeMillis() - lastTime < 24 * 60 * 60 * 1000L) {
+            lastCrashReport.value = lastTrace
+        }
+
+        isSafeMode.value = isSafe
+        if (isSafe) {
+            Log.w(TAG, "Aura starting in SAFE MODE (overlays & auto wake word disabled)")
+        }
+    }
+
+    fun dismissLastCrashReport() {
+        lastCrashReport.value = null
+        val prefs = getSharedPreferences("aura_crash_meta", Context.MODE_PRIVATE)
+        prefs.edit().remove("last_crash_trace").apply()
+    }
+
+    fun disableSafeMode() {
+        isSafeMode.value = false
+        val prefs = getSharedPreferences("aura_crash_meta", Context.MODE_PRIVATE)
+        prefs.edit()
+            .putBoolean("safe_mode_active", false)
+            .remove("crash_timestamps")
+            .apply()
+
+        appScope.launch {
+            val auraPrefs = AuraPreferences(this@AuraApplication)
+            auraPrefs.setSafeModeTriggered(false)
+        }
     }
 
     private fun setupCrashHandler() {
@@ -53,17 +102,37 @@ class AuraApplication : Application(), Application.ActivityLifecycleCallbacks {
                 val stackTrace = sw.toString()
                 Log.e(TAG, "FATAL CRASH in thread ${thread.name}: $stackTrace")
 
+                val now = System.currentTimeMillis()
                 val crashFile = File(filesDir, "crash_logs.txt")
-                val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
-                val logEntry = "\n--- CRASH AT $timestamp [Thread: ${thread.name}] ---\n$stackTrace\n"
+                val timestampStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date(now))
+                val logEntry = "\n--- CRASH AT $timestampStr [Thread: ${thread.name}] ---\n$stackTrace\n"
 
-                // Keep log size bounded (max ~64KB)
                 if (crashFile.exists() && crashFile.length() > 64 * 1024) {
                     val prev = crashFile.readText().takeLast(32 * 1024)
                     crashFile.writeText(prev + logEntry)
                 } else {
                     crashFile.appendText(logEntry)
                 }
+
+                // Crash loop breaker: 3 crashes within 2 minutes (120,000 ms)
+                val prefs = getSharedPreferences("aura_crash_meta", Context.MODE_PRIVATE)
+                val rawHistory = prefs.getString("crash_timestamps", "") ?: ""
+                val recentTimestamps = rawHistory.split(",")
+                    .mapNotNull { it.trim().toLongOrNull() }
+                    .filter { now - it < 2 * 60 * 1000L }
+                    .toMutableList()
+
+                recentTimestamps.add(now)
+
+                val triggerSafeMode = recentTimestamps.size >= 3
+
+                prefs.edit()
+                    .putString("last_crash_trace", stackTrace)
+                    .putLong("last_crash_timestamp", now)
+                    .putString("crash_timestamps", recentTimestamps.joinToString(","))
+                    .putBoolean("safe_mode_active", triggerSafeMode || prefs.getBoolean("safe_mode_active", false))
+                    .commit()
+
             } catch (e: Exception) {
                 Log.e(TAG, "Failed writing crash log", e)
             } finally {

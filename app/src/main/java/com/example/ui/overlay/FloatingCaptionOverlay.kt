@@ -44,16 +44,20 @@ class FloatingCaptionOverlay(
     private var currentCaption = CaptionState()
 
     fun show(): Boolean {
-        if (isAttached) {
-            fadeIn()
-            return true
-        }
-        if (!Settings.canDrawOverlays(context)) {
-            Log.w(TAG, "Cannot show FloatingCaptionOverlay: SYSTEM_ALERT_WINDOW not granted")
-            return false
-        }
+        var result = false
+        OverlayGuard.run("floating_captions", context) {
+            if (isAttached) {
+                rootView?.visibility = View.VISIBLE
+                fadeIn()
+                result = true
+                return@run
+            }
+            if (!Settings.canDrawOverlays(context)) {
+                Log.w(TAG, "Cannot show FloatingCaptionOverlay: SYSTEM_ALERT_WINDOW not granted")
+                result = false
+                return@run
+            }
 
-        try {
             val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
             } else {
@@ -86,11 +90,9 @@ class FloatingCaptionOverlay(
             rootView?.alpha = 0f
             fadeIn()
             Log.i(TAG, "FloatingCaptionOverlay attached successfully")
-            return true
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed attaching FloatingCaptionOverlay: ${e.message}", e)
-            return false
+            result = true
         }
+        return result
     }
 
     private fun createView(maxW: Int) {
@@ -104,7 +106,7 @@ class FloatingCaptionOverlay(
         val backgroundDrawable = GradientDrawable().apply {
             shape = GradientDrawable.RECTANGLE
             cornerRadius = 16f * density
-            setColor(Color.argb(230, 18, 18, 26)) // #E612121A
+            setColor(Color.argb(230, 18, 18, 26))
             setStroke((1f * density).toInt(), Color.argb(60, 255, 255, 255))
         }
 
@@ -123,7 +125,7 @@ class FloatingCaptionOverlay(
             )
         }
 
-        // Header row with "Aura Live" badge & Stop button
+        // Header row with "Aura Live" badge
         val headerRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -136,25 +138,15 @@ class FloatingCaptionOverlay(
         }
 
         val badgeText = TextView(context).apply {
-            text = "● AURA LIVE"
+            text = "● MAYA LIVE"
             textSize = 10f
             setTextColor(Color.parseColor("#FFB347"))
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
         }
         headerRow.addView(badgeText)
-
-        val btn = ImageButton(context).apply {
-            setBackgroundColor(Color.TRANSPARENT)
-            setImageResource(android.R.drawable.ic_menu_close_clear_cancel)
-            setColorFilter(Color.parseColor("#A0A5B9"))
-            setPadding((4 * density).toInt(), (4 * density).toInt(), (4 * density).toInt(), (4 * density).toInt())
-            setOnClickListener {
-                onStopRequested?.invoke()
-                hideImmediate()
-            }
-        }
-        stopButton = btn
-        headerRow.addView(btn)
         container.addView(headerRow)
 
         // User speech line
@@ -191,44 +183,46 @@ class FloatingCaptionOverlay(
     }
 
     fun updateCaptions(caption: CaptionState) {
-        currentCaption = caption
-        val userText = caption.userText.trim()
-        val auraText = caption.auraText.trim()
+        OverlayGuard.run("floating_captions", context) {
+            currentCaption = caption
+            val userText = caption.userText.trim()
+            val auraText = caption.auraText.trim()
 
-        if (userText.isBlank() && auraText.isBlank()) {
-            scheduleAutoHide(1000L)
-            return
-        }
-
-        if (!isAttached) {
-            show()
-        } else if (!isVisible) {
-            fadeIn()
-        }
-
-        userTextView?.apply {
-            if (userText.isNotBlank()) {
-                text = "You: $userText"
-                visibility = View.VISIBLE
-            } else {
-                visibility = View.GONE
+            if (userText.isBlank() && auraText.isBlank()) {
+                scheduleAutoHide(1000L)
+                return@run
             }
-        }
 
-        auraTextView?.apply {
-            if (auraText.isNotBlank()) {
-                text = "Aura: $auraText"
-                visibility = View.VISIBLE
-            } else {
-                visibility = View.GONE
+            rootView?.visibility = View.VISIBLE
+            if (!isAttached) {
+                show()
+            } else if (!isVisible) {
+                fadeIn()
             }
-        }
 
-        // Keep visible while talking, fade out ~3s after silence/completion
-        if (!caption.isAuraSpeaking) {
-            scheduleAutoHide(3200L)
-        } else {
-            autoHideJob?.cancel()
+            userTextView?.apply {
+                if (userText.isNotBlank()) {
+                    text = "You: $userText"
+                    visibility = View.VISIBLE
+                } else {
+                    visibility = View.GONE
+                }
+            }
+
+            auraTextView?.apply {
+                if (auraText.isNotBlank()) {
+                    text = "Maya: $auraText"
+                    visibility = View.VISIBLE
+                } else {
+                    visibility = View.GONE
+                }
+            }
+
+            if (!caption.isAuraSpeaking) {
+                scheduleAutoHide(4500L)
+            } else {
+                autoHideJob?.cancel()
+            }
         }
     }
 
@@ -243,6 +237,7 @@ class FloatingCaptionOverlay(
     private fun fadeIn() {
         isVisible = true
         rootView?.let { view ->
+            view.visibility = View.VISIBLE
             ValueAnimator.ofFloat(view.alpha, 1f).apply {
                 duration = 150L
                 addUpdateListener { view.alpha = it.animatedValue as Float }
@@ -269,35 +264,39 @@ class FloatingCaptionOverlay(
     }
 
     fun hideImmediate() {
-        isVisible = false
-        autoHideJob?.cancel()
-        rootView?.let { view ->
-            ValueAnimator.ofFloat(view.alpha, 0f).apply {
-                duration = 150L
-                addUpdateListener {
-                    val a = it.animatedValue as Float
-                    view.alpha = a
-                    if (a <= 0.01f) {
-                        view.visibility = View.GONE
+        OverlayGuard.run("floating_captions", context) {
+            isVisible = false
+            autoHideJob?.cancel()
+            rootView?.let { view ->
+                ValueAnimator.ofFloat(view.alpha, 0f).apply {
+                    duration = 150L
+                    addUpdateListener {
+                        val a = it.animatedValue as Float
+                        view.alpha = a
+                        if (a <= 0.01f) {
+                            view.visibility = View.GONE
+                        }
                     }
+                    start()
                 }
-                start()
             }
         }
     }
 
     fun destroy() {
-        autoHideJob?.cancel()
-        scope.cancel()
-        if (isAttached && rootView != null) {
-            try {
-                windowManager.removeView(rootView)
-            } catch (e: Exception) {
-                Log.e(TAG, "Error removing FloatingCaptionOverlay", e)
-            } finally {
-                rootView = null
-                isAttached = false
-                isVisible = false
+        OverlayGuard.run("floating_captions", context) {
+            autoHideJob?.cancel()
+            scope.cancel()
+            if (isAttached && rootView != null) {
+                try {
+                    windowManager.removeView(rootView)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error removing FloatingCaptionOverlay", e)
+                } finally {
+                    rootView = null
+                    isAttached = false
+                    isVisible = false
+                }
             }
         }
     }

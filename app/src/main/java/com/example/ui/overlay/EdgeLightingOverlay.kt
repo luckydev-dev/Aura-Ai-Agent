@@ -17,18 +17,26 @@ class EdgeLightingOverlay(private val context: Context) {
     private var edgeView: EdgeLightingView? = null
     private var isOverlayAttached = false
 
-    private var currentDepthPercent = 22
+    private var currentStyle: EdgeStyle = EdgeStyle.NEON_RAINBOW
+    private var currentCometCount: Int = 1
+    private var currentFlowSpeed: Float = 1.0f
+    private var currentDepthPercent = 7
     private var currentIntensity = 1.0f
     private var currentColorTheme = "Aura"
 
     fun show(): Boolean {
-        if (isOverlayAttached) return true
-        if (!Settings.canDrawOverlays(context)) {
-            Log.w(TAG, "Cannot show EdgeLightingOverlay: SYSTEM_ALERT_WINDOW not granted")
-            return false
-        }
+        var result = false
+        OverlayGuard.run("edge_lighting", context) {
+            if (isOverlayAttached) {
+                result = true
+                return@run
+            }
+            if (!Settings.canDrawOverlays(context)) {
+                Log.w(TAG, "Cannot show EdgeLightingOverlay: SYSTEM_ALERT_WINDOW not granted")
+                result = false
+                return@run
+            }
 
-        try {
             val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
             } else {
@@ -56,6 +64,9 @@ class EdgeLightingOverlay(private val context: Context) {
             }
 
             val view = EdgeLightingView(context).apply {
+                style = currentStyle
+                cometCount = currentCometCount
+                flowSpeedMultiplier = currentFlowSpeed
                 depthPercent = currentDepthPercent
                 intensity = currentIntensity
                 colorTheme = currentColorTheme
@@ -64,51 +75,82 @@ class EdgeLightingOverlay(private val context: Context) {
             edgeView = view
             isOverlayAttached = true
             Log.i(TAG, "EdgeLightingOverlay attached to windowManager successfully")
-            return true
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to attach EdgeLightingOverlay: ${e.message}", e)
-            return false
+            result = true
         }
+        return result
     }
 
     fun setState(state: EdgeLightingState) {
-        if (!isOverlayAttached && state != EdgeLightingState.HIDDEN) {
-            show()
+        OverlayGuard.run("edge_lighting", context) {
+            if (!isOverlayAttached && state != EdgeLightingState.HIDDEN) {
+                show()
+            }
+            edgeView?.setState(state)
         }
-        edgeView?.setState(state)
     }
 
     fun updateAmplitudes(mic: Float, speaker: Float) {
-        edgeView?.updateAmplitudes(mic, speaker)
+        OverlayGuard.run("edge_lighting", context) {
+            edgeView?.updateAmplitudes(mic, speaker)
+        }
+    }
+
+    fun setStyle(style: EdgeStyle) {
+        OverlayGuard.run("edge_lighting", context) {
+            currentStyle = style
+            edgeView?.style = style
+        }
+    }
+
+    fun setCometCount(count: Int) {
+        OverlayGuard.run("edge_lighting", context) {
+            currentCometCount = count
+            edgeView?.cometCount = count
+        }
+    }
+
+    fun setFlowSpeed(speed: Float) {
+        OverlayGuard.run("edge_lighting", context) {
+            currentFlowSpeed = speed
+            edgeView?.flowSpeedMultiplier = speed
+        }
     }
 
     fun setDepthPercent(depth: Int) {
-        currentDepthPercent = depth
-        edgeView?.depthPercent = depth
+        OverlayGuard.run("edge_lighting", context) {
+            currentDepthPercent = depth
+            edgeView?.depthPercent = depth
+        }
     }
 
     fun setIntensity(intensity: Float) {
-        currentIntensity = intensity
-        edgeView?.intensity = intensity
+        OverlayGuard.run("edge_lighting", context) {
+            currentIntensity = intensity
+            edgeView?.intensity = intensity
+        }
     }
 
     fun setColorTheme(theme: String) {
-        currentColorTheme = theme
-        edgeView?.colorTheme = theme
+        OverlayGuard.run("edge_lighting", context) {
+            currentColorTheme = theme
+            edgeView?.colorTheme = theme
+        }
     }
 
     fun hide() {
-        if (!isOverlayAttached || edgeView == null) return
-        try {
-            edgeView?.setState(EdgeLightingState.HIDDEN)
-            windowManager.removeView(edgeView)
-            edgeView?.release()
-        } catch (e: Exception) {
-            Log.e(TAG, "Error detaching EdgeLightingOverlay: ${e.message}", e)
-        } finally {
-            edgeView = null
-            isOverlayAttached = false
-            Log.i(TAG, "EdgeLightingOverlay detached")
+        OverlayGuard.run("edge_lighting", context) {
+            if (!isOverlayAttached || edgeView == null) return@run
+            try {
+                edgeView?.setState(EdgeLightingState.HIDDEN)
+                windowManager.removeView(edgeView)
+                edgeView?.release()
+            } catch (e: Exception) {
+                Log.e(TAG, "Error detaching EdgeLightingOverlay: ${e.message}", e)
+            } finally {
+                edgeView = null
+                isOverlayAttached = false
+                Log.i(TAG, "EdgeLightingOverlay detached")
+            }
         }
     }
 }

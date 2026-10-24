@@ -83,21 +83,14 @@ class VoiceAgentControlTools(
         )
 
         override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
-            val reqVoice = args["voice_name"]?.toString()?.trim() ?: "random"
-            val targetVoice = if (reqVoice.equals("random", ignoreCase = true)) {
-                VoiceCatalog.getRandomVoice().name
-            } else {
-                VoiceCatalog.findVoice(reqVoice)?.name ?: reqVoice
-            }
-
+            val targetVoice = AuraPreferences.DEFAULT_VOICE
             preferences.setVoiceName(targetVoice)
             onVoiceChangeRequested?.invoke(targetVoice)
 
             val resp = JSONObject().apply {
                 put("success", true)
-                put("scheduled", true)
                 put("voice", targetVoice)
-                put("message", "Theek hai, awaaz badal rahi hu.")
+                put("message", "Awaaz Maya par fixed hai.")
             }
             return ToolExecutionResult(true, resp.toString())
         }

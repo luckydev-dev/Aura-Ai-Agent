@@ -28,6 +28,7 @@ import com.example.core.tools.AppInventory
 import com.example.core.tools.ToolRegistry
 import com.example.ui.overlay.EdgeLightingOverlay
 import com.example.ui.overlay.OverlayController
+import com.example.core.telephony.CallAnnouncementManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -136,6 +137,7 @@ class AuraForegroundService : Service() {
     lateinit var voskModelManager: VoskModelManager
     lateinit var wakePhraseDetector: WakePhraseDetector
     lateinit var overlayController: OverlayController
+    lateinit var callAnnouncementManager: CallAnnouncementManager
 
     private val diagnostics get() = AuraApplication.instance.liveDiagnostics
 
@@ -247,6 +249,7 @@ class AuraForegroundService : Service() {
             }
 
             createNotificationChannel()
+            callAnnouncementManager = CallAnnouncementManager(this, preferences, rootManager)
             observeLiveState()
 
             // Publish instance only after all fields are fully initialized!
@@ -258,8 +261,17 @@ class AuraForegroundService : Service() {
 
     private fun observeLiveState() {
         serviceScope.launch {
+            preferences.assistantName.collectLatest { name ->
+                wakePhraseDetector.assistantName = name
+            }
+        }
+
+        serviceScope.launch {
             liveClient.captionState.collectLatest { caption ->
                 overlayController.updateCaptions(caption)
+                if (::callAnnouncementManager.isInitialized && callAnnouncementManager.isRinging && caption.userText.isNotBlank()) {
+                    callAnnouncementManager.handleVoiceCallDecision(caption.userText)
+                }
             }
         }
 
@@ -381,9 +393,17 @@ class AuraForegroundService : Service() {
     }
 
     private fun initiateWakeListening() {
+        if (AuraApplication.isSafeMode.value) {
+            Log.w(TAG, "Safe Mode is active: wake word listening disabled")
+            diagnostics.setWakeWordState("Disabled (Safe Mode)")
+            _isCallActive.value = false
+            _serviceMode.value = ServiceMode.STOPPED
+            updateNotification()
+            return
+        }
+
         _isCallActive.value = false
         _serviceMode.value = ServiceMode.WAKE_LISTENING
-        diagnostics.setWakeWordState("Listening for 'Hey Aura'")
 
         // Stop call audio capture & player if active
         audioStreamer.stop()
@@ -391,11 +411,15 @@ class AuraForegroundService : Service() {
         abandonVoiceAudioFocus()
 
         serviceScope.launch {
+            val name = preferences.assistantName.first()
             val sensitivity = preferences.wakeWordSensitivity.first()
+            wakePhraseDetector.assistantName = name
             wakePhraseDetector.sensitivity = sensitivity
+            diagnostics.setWakeWordState("Listening for '$name' / 'Aura'")
+
             val started = wakePhraseDetector.startListening(serviceScope)
             if (started) {
-                diagnostics.setWakeWordState("Active ('Hey Aura')")
+                diagnostics.setWakeWordState("Active ('$name')")
             } else {
                 diagnostics.setWakeWordState("Idle / Model Not Ready")
             }
@@ -728,6 +752,9 @@ class AuraForegroundService : Service() {
         currentService = null
         terminateCall()
         wakePhraseDetector.release()
+        if (::callAnnouncementManager.isInitialized) {
+            callAnnouncementManager.destroy()
+        }
         appInventory.destroy()
         overlayController.destroy()
 

@@ -3,13 +3,13 @@ package com.example.ui.overlay
 import android.content.Context
 import android.provider.Settings
 import android.util.Log
+import com.example.AuraApplication
 import com.example.core.lifecycle.AppForegroundState
 import com.example.core.live.CaptionState
 import com.example.core.live.LiveConnectionState
 import com.example.core.settings.AuraPreferences
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 
 class OverlayController(
@@ -35,7 +35,6 @@ class OverlayController(
     private var latestCaption = CaptionState()
 
     fun startObserving() {
-        // Collect edge lighting settings
         controllerScope.launch {
             preferences.edgeLightingDepthPercent.collectLatest { depth ->
                 edgeLightingOverlay.setDepthPercent(depth)
@@ -49,6 +48,36 @@ class OverlayController(
         controllerScope.launch {
             preferences.edgeLightingIntensity.collectLatest { inten ->
                 edgeLightingOverlay.setIntensity(inten)
+            }
+        }
+        controllerScope.launch {
+            preferences.edgeLightingStyle.collectLatest { styleStr ->
+                val style = if (styleStr.equals("SOFT_GRADIENT", ignoreCase = true)) {
+                    EdgeStyle.SOFT_GRADIENT
+                } else {
+                    EdgeStyle.NEON_RAINBOW
+                }
+                edgeLightingOverlay.setStyle(style)
+            }
+        }
+        controllerScope.launch {
+            preferences.edgeLightingCometCount.collectLatest { count ->
+                edgeLightingOverlay.setCometCount(count)
+            }
+        }
+        controllerScope.launch {
+            preferences.edgeLightingFlowSpeed.collectLatest { speed ->
+                edgeLightingOverlay.setFlowSpeed(speed)
+            }
+        }
+        controllerScope.launch {
+            preferences.edgeLightingEnabled.collectLatest {
+                reEvaluateOverlays(AppForegroundState.current)
+            }
+        }
+        controllerScope.launch {
+            preferences.edgeLightingShowInApp.collectLatest {
+                reEvaluateOverlays(AppForegroundState.current)
             }
         }
 
@@ -69,7 +98,7 @@ class OverlayController(
     fun updateCaptions(caption: CaptionState) {
         latestCaption = caption
         val isForeground = AppForegroundState.current
-        if (!isForeground && isCallActive) {
+        if (!isForeground && isCallActive && !AuraApplication.isSafeMode.value) {
             controllerScope.launch {
                 val floatingCaptionsOn = preferences.floatingCaptionsEnabled.first()
                 if (floatingCaptionsOn) {
@@ -100,6 +129,14 @@ class OverlayController(
     }
 
     private suspend fun reEvaluateOverlays(isAppInForeground: Boolean) {
+        // In Safe Mode, never display overlays
+        if (AuraApplication.isSafeMode.value) {
+            floatingCaptionOverlay.hideImmediate()
+            overlayManager.hideOverlay()
+            edgeLightingOverlay.setState(EdgeLightingState.HIDDEN)
+            return
+        }
+
         val edgeEnabled = preferences.edgeLightingEnabled.first()
         val showEdgeInApp = preferences.edgeLightingShowInApp.first()
         val miniOrbEnabled = preferences.overlayEnabled.first()
@@ -113,12 +150,12 @@ class OverlayController(
         }
 
         // 1. Manage Floating Captions & Mini Orb:
-        // STRICT RULE: If inside Aura app, NEVER show floating captions or mini orb!
+        // Inside Aura app: NO floating captions and NO mini orb
+        // Outside Aura app: appear immediately and disappear when returning to app
         if (isAppInForeground || !isCallActive) {
             floatingCaptionOverlay.hideImmediate()
             overlayManager.hideOverlay()
         } else {
-            // Outside Aura app:
             if (floatingCaptionsOn && (latestCaption.auraText.isNotBlank() || latestCaption.userText.isNotBlank())) {
                 floatingCaptionOverlay.updateCaptions(latestCaption)
             }

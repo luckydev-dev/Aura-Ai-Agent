@@ -10,6 +10,7 @@ import android.telephony.SmsManager
 import com.example.core.agent.ScreenXmlParser
 import com.example.core.root.RootManager
 import com.example.core.settings.AuraPreferences
+import com.example.core.telephony.CallAnnouncementManager
 import com.example.service.AuraNotificationListener
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -25,7 +26,6 @@ class CommTools(
     @SuppressLint("Range")
     fun resolveContactNumber(query: String): Pair<String, String>? {
         val cleanQuery = query.trim()
-        // If already numeric/phone format
         if (cleanQuery.matches(Regex("""^\+?[0-9\s\-]{7,16}$"""))) {
             return Pair(cleanQuery.replace(Regex("""[\s\-]"""), ""), cleanQuery)
         }
@@ -89,24 +89,21 @@ class CommTools(
                 rootManager.execute("am start -a android.intent.action.VIEW -d \"$uri\" $pkg")
             }
 
-            // Wait for WhatsApp to open and load the message in the input field
             delay(2200)
 
-            // Look for WhatsApp send button via uiautomator
             val dumpRes = rootManager.execute("uiautomator dump /sdcard/ui_wa.xml && cat /sdcard/ui_wa.xml")
             val nodes = ScreenXmlParser.parse(dumpRes.stdout)
             val sendButton = nodes.find {
                 it.resourceId == "send" ||
                 it.contentDescription.equals("Send", ignoreCase = true) ||
-                it.contentDescription.contains("भेजें") // Hindi locale support
+                it.contentDescription.contains("भेजें")
             }
 
             return if (sendButton != null) {
                 rootManager.execute("input tap ${sendButton.centerX} ${sendButton.centerY}")
                 ToolExecutionResult(true, "Sent WhatsApp message to ${contactInfo?.first ?: phone}")
             } else {
-                // Fallback: enter key event or standard send button location on right edge
-                rootManager.execute("input keyevent 66") // KEYCODE_ENTER
+                rootManager.execute("input keyevent 66")
                 ToolExecutionResult(true, "Opened chat with message prefilled and tapped send.")
             }
         }
@@ -136,7 +133,6 @@ class CommTools(
                 smsManager.sendMultipartTextMessage(destination, null, parts, null, null)
                 ToolExecutionResult(true, "SMS sent to ${info?.first ?: destination}")
             } catch (e: Exception) {
-                // Fallback via root service call
                 val res = rootManager.execute("service call isms 7 i32 0 s16 \"com.android.mms\" s16 \"$destination\" s16 \"null\" s16 \"$text\"")
                 if (res.success) {
                     ToolExecutionResult(true, "SMS sent via root to $destination")
@@ -174,12 +170,62 @@ class CommTools(
 
     val answerCallTool = object : Tool {
         override val name = "answer_call"
-        override val description = "Answers an incoming phone call."
+        override val description = "Answers an incoming cellular or VoIP phone call and releases microphone."
         override val parametersSchema = mapOf("type" to "object", "properties" to emptyMap<String, Any>())
 
         override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
-            val res = rootManager.execute("input keyevent 5") // KEYCODE_CALL
-            return ToolExecutionResult(res.success, if (res.success) "Answered incoming call" else res.stderr)
+            val cam = CallAnnouncementManager.instance
+            val success = cam?.answerCall() ?: run {
+                val res = rootManager.execute("input keyevent 5")
+                res.success
+            }
+            return ToolExecutionResult(success, if (success) "Answered incoming call and released microphone" else "Could not answer call")
+        }
+    }
+
+    val rejectCallTool = object : Tool {
+        override val name = "reject_call"
+        override val description = "Rejects or declines an incoming phone call."
+        override val parametersSchema = mapOf("type" to "object", "properties" to emptyMap<String, Any>())
+
+        override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
+            val cam = CallAnnouncementManager.instance
+            val success = cam?.rejectCall() ?: run {
+                val res = rootManager.execute("input keyevent 6")
+                res.success
+            }
+            return ToolExecutionResult(success, if (success) "Rejected incoming call" else "Could not reject call")
+        }
+    }
+
+    val rejectCallWithMessageTool = object : Tool {
+        override val name = "reject_call_with_message"
+        override val description = "Rejects incoming call and sends a quick SMS or message to the caller."
+        override val parametersSchema = mapOf(
+            "type" to "object",
+            "properties" to mapOf(
+                "message" to mapOf("type" to "string", "description" to "Text message to send to the caller.")
+            ),
+            "required" to listOf("message")
+        )
+
+        override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
+            val message = args["message"]?.toString() ?: "I am busy, will call you back later."
+            val cam = CallAnnouncementManager.instance
+            val success = cam?.rejectCallWithMessage(message) ?: false
+            return ToolExecutionResult(success, if (success) "Rejected call and sent SMS: '$message'" else "Could not send rejection message")
+        }
+    }
+
+    val silenceRingerTool = object : Tool {
+        override val name = "silence_ringer"
+        override val description = "Silences or mutes the incoming call ringer."
+        override val parametersSchema = mapOf("type" to "object", "properties" to emptyMap<String, Any>())
+
+        override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
+            val cam = CallAnnouncementManager.instance
+            val success = cam?.silenceRinger() ?: false
+            return ToolExecutionResult(success, if (success) "Ringer silenced" else "Failed to silence ringer")
         }
     }
 
@@ -189,8 +235,12 @@ class CommTools(
         override val parametersSchema = mapOf("type" to "object", "properties" to emptyMap<String, Any>())
 
         override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
-            val res = rootManager.execute("input keyevent 6") // KEYCODE_ENDCALL
-            return ToolExecutionResult(res.success, if (res.success) "Ended call" else res.stderr)
+            val cam = CallAnnouncementManager.instance
+            val success = cam?.rejectCall() ?: run {
+                val res = rootManager.execute("input keyevent 6")
+                res.success
+            }
+            return ToolExecutionResult(success, if (success) "Ended call" else "Could not end call")
         }
     }
 
@@ -388,7 +438,8 @@ class CommTools(
     }
 
     fun getAllTools(): List<Tool> = listOf(
-        sendWhatsappTool, sendSmsTool, makeCallTool, answerCallTool, endCallTool,
+        sendWhatsappTool, sendSmsTool, makeCallTool, answerCallTool, rejectCallTool,
+        rejectCallWithMessageTool, silenceRingerTool, endCallTool,
         readSmsTool, readCallLogTool, readNotificationsTool, replyToNotificationTool,
         dismissNotificationTool, searchContactsTool
     )

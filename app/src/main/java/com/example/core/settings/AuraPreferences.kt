@@ -14,6 +14,12 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import java.io.IOException
 
+data class ApiKeyEntry(
+    val key: String,
+    val status: String = "UNTESTED", // "WORKING", "EXCEEDED", "UNTESTED"
+    val addedMs: Long = System.currentTimeMillis()
+)
+
 val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "aura_preferences")
 
 class AuraPreferences(
@@ -49,8 +55,11 @@ class AuraPreferences(
 
         // Overlays & Edge Lighting
         val KEY_EDGE_LIGHTING_ENABLED = booleanPreferencesKey("edge_lighting_enabled")
+        val KEY_EDGE_LIGHTING_STYLE = stringPreferencesKey("edge_lighting_style") // "NEON_RAINBOW", "SOFT_GRADIENT"
+        val KEY_EDGE_LIGHTING_COMET_COUNT = intPreferencesKey("edge_lighting_comet_count") // 1 or 2
+        val KEY_EDGE_LIGHTING_FLOW_SPEED = floatPreferencesKey("edge_lighting_flow_speed") // 0.5 to 2.5
         val KEY_EDGE_LIGHTING_THICKNESS = intPreferencesKey("edge_lighting_thickness")
-        val KEY_EDGE_LIGHTING_DEPTH_PERCENT = intPreferencesKey("edge_lighting_depth_percent") // 8 to 40, default 22
+        val KEY_EDGE_LIGHTING_DEPTH_PERCENT = intPreferencesKey("edge_lighting_depth_percent") // 2 to 30, default 7
         val KEY_EDGE_LIGHTING_THEME = stringPreferencesKey("edge_lighting_theme") // "Aura", "Ocean", "Sunset", "Mono"
         val KEY_EDGE_LIGHTING_SHOW_IN_APP = booleanPreferencesKey("edge_lighting_show_in_app") // default true
         val KEY_EDGE_LIGHTING_SHOW_WAKE = booleanPreferencesKey("edge_lighting_show_wake") // default false
@@ -68,12 +77,34 @@ class AuraPreferences(
         val KEY_PLANNER_USE_SCREENSHOTS = booleanPreferencesKey("planner_use_screenshots") // default true
         val KEY_PLANNER_MAX_TIME_SECONDS = intPreferencesKey("planner_max_time_seconds") // default 180
 
-        // Persona & Owner
+        // Persona & Assistant Identity
+        val KEY_ASSISTANT_NAME = stringPreferencesKey("assistant_name") // default "Maya"
+        val KEY_SELECTED_PERSONA = stringPreferencesKey("selected_persona") // "maya", "friday", "venom", "jarvis", "custom"
+        val KEY_RELATIONSHIP_STYLE = stringPreferencesKey("relationship_style") // "girlfriend", "friend", "assistant"
         val KEY_OWNER_NAME = stringPreferencesKey("owner_name")
         val KEY_EXTRA_INSTRUCTIONS = stringPreferencesKey("extra_instructions")
+        val KEY_PERSONA_PROMPT_MAYA = stringPreferencesKey("persona_prompt_maya")
+        val KEY_PERSONA_PROMPT_FRIDAY = stringPreferencesKey("persona_prompt_friday")
+        val KEY_PERSONA_PROMPT_VENOM = stringPreferencesKey("persona_prompt_venom")
+        val KEY_PERSONA_PROMPT_JARVIS = stringPreferencesKey("persona_prompt_jarvis")
+        val KEY_PERSONA_PROMPT_CUSTOM = stringPreferencesKey("persona_prompt_custom")
         val KEY_PERSONA_VERSION = intPreferencesKey("persona_version")
         val KEY_SYSTEM_INSTRUCTION = stringPreferencesKey("system_instruction")
         val KEY_INCLUDE_SYSTEM_APPS = booleanPreferencesKey("include_system_apps")
+
+        // Incoming Call Announcements
+        val KEY_CALL_ANNOUNCEMENT_ENABLED = booleanPreferencesKey("call_announcement_enabled")
+        val KEY_CALL_ANNOUNCE_WHATSAPP = booleanPreferencesKey("call_announce_whatsapp")
+        val KEY_CALL_AUTO_ANSWER_VOICE = booleanPreferencesKey("call_auto_answer_voice")
+
+        // Screen Lock & Automation
+        val KEY_SCREEN_LOCK_TYPE = stringPreferencesKey("screen_lock_type") // "NONE", "PATTERN", "PIN", "PASSWORD"
+        val KEY_SAVED_PATTERN_POINTS = stringPreferencesKey("saved_pattern_points") // e.g. "0,1,2,4,6"
+        val KEY_SAVED_LOCK_PIN = stringPreferencesKey("saved_lock_pin")
+        val KEY_SAVED_LOCK_PASSWORD = stringPreferencesKey("saved_lock_password")
+
+        // Safe Mode
+        val KEY_SAFE_MODE_TRIGGERED = booleanPreferencesKey("safe_mode_triggered")
 
         // Existing General Settings
         val KEY_CONFIRM_RISKY_ACTIONS = booleanPreferencesKey("confirm_risky_actions")
@@ -90,7 +121,9 @@ class AuraPreferences(
         const val DEFAULT_VOICE = "Aoede"
         const val DEFAULT_THINKING_LEVEL = "LOW"
         const val DEFAULT_LANGUAGE = "Hinglish"
-        const val DEFAULT_OWNER_NAME = "Lucky, also known as Sohil"
+        const val DEFAULT_ASSISTANT_NAME = "Maya"
+        const val DEFAULT_PERSONA = "maya"
+        const val DEFAULT_OWNER_NAME = "Boss"
 
         val INITIAL_LIVE_MODELS = listOf(
             "gemini-3.8-live",
@@ -118,10 +151,108 @@ class AuraPreferences(
         val WAKE_SENSITIVITY_OPTIONS = listOf("normal", "strict", "loose")
     }
 
+    private val poolKeyTrigger = kotlinx.coroutines.flow.MutableStateFlow(0)
+
+    fun getApiKeyPool(): List<ApiKeyEntry> {
+        val jsonStr = encryptedKeyStorage.getApiKeyPoolJson()
+        if (jsonStr.isBlank()) {
+            val single = encryptedKeyStorage.getApiKey()
+            if (single.isNotBlank()) {
+                return listOf(ApiKeyEntry(key = single, status = "WORKING"))
+            }
+            return emptyList()
+        }
+        return try {
+            val arr = org.json.JSONArray(jsonStr)
+            val list = mutableListOf<ApiKeyEntry>()
+            for (i in 0 until arr.length()) {
+                val obj = arr.getJSONObject(i)
+                list.add(
+                    ApiKeyEntry(
+                        key = obj.optString("key"),
+                        status = obj.optString("status", "UNTESTED"),
+                        addedMs = obj.optLong("addedMs", System.currentTimeMillis())
+                    )
+                )
+            }
+            list
+        } catch (e: Exception) {
+            Log.e(TAG, "Error parsing API key pool JSON", e)
+            emptyList()
+        }
+    }
+
+    private fun saveApiKeyPool(pool: List<ApiKeyEntry>) {
+        val arr = org.json.JSONArray()
+        pool.forEach { entry ->
+            val obj = org.json.JSONObject().apply {
+                put("key", entry.key)
+                put("status", entry.status)
+                put("addedMs", entry.addedMs)
+            }
+            arr.put(obj)
+        }
+        encryptedKeyStorage.setApiKeyPoolJson(arr.toString())
+        poolKeyTrigger.value = poolKeyTrigger.value + 1
+    }
+
+    fun addApiKey(key: String, status: String = "UNTESTED") {
+        val cleanKey = key.trim()
+        if (cleanKey.isBlank()) return
+        val current = getApiKeyPool().toMutableList()
+        val existingIndex = current.indexOfFirst { it.key == cleanKey }
+        if (existingIndex >= 0) {
+            current[existingIndex] = current[existingIndex].copy(status = status)
+        } else {
+            current.add(ApiKeyEntry(key = cleanKey, status = status))
+        }
+        saveApiKeyPool(current)
+    }
+
+    fun removeApiKey(key: String) {
+        val current = getApiKeyPool().filter { it.key != key.trim() }
+        saveApiKeyPool(current)
+    }
+
+    fun markKeyStatus(key: String, status: String) {
+        val current = getApiKeyPool().map {
+            if (it.key == key.trim()) it.copy(status = status) else it
+        }
+        saveApiKeyPool(current)
+    }
+
+    fun getPrimaryWorkingKey(): String {
+        val pool = getApiKeyPool()
+        if (pool.isNotEmpty()) {
+            val working = pool.firstOrNull { it.status.equals("WORKING", ignoreCase = true) }
+            if (working != null) return working.key
+
+            val untested = pool.firstOrNull { it.status.equals("UNTESTED", ignoreCase = true) }
+            if (untested != null) return untested.key
+
+            val exceeded = pool.firstOrNull { it.status.equals("EXCEEDED", ignoreCase = true) }
+            if (exceeded != null) return exceeded.key
+        }
+
+        val encrypted = encryptedKeyStorage.getApiKey()
+        if (encrypted.isNotBlank()) return encrypted
+
+        return try {
+            val field = BuildConfig::class.java.getField("GEMINI_API_KEY")
+            val key = field.get(null) as? String
+            if (!key.isNullOrBlank() && key != "MY_GEMINI_API_KEY") key else ""
+        } catch (e: Exception) {
+            ""
+        }
+    }
+
+    val apiKeyPool: Flow<List<ApiKeyEntry>> = poolKeyTrigger.map { getApiKeyPool() }
+
+    val apiKey: Flow<String> = poolKeyTrigger.map { getPrimaryWorkingKey() }
+
     suspend fun migrateIfNeeded() {
         try {
             context.dataStore.edit { prefs ->
-                // 1. Migrate obsolete or discontinued models to gemini-3.8-live
                 val currentModel = prefs[KEY_MODEL_NAME]
                 if (currentModel.isNullOrBlank() ||
                     currentModel == "gemini-2.0-flash-exp" ||
@@ -131,20 +262,17 @@ class AuraPreferences(
                     Log.i(TAG, "Migrated model to $DEFAULT_MODEL")
                 }
 
-                // 2. Migrate API key from plain DataStore to EncryptedKeyStorage
                 val legacyKey = prefs[KEY_API_KEY]
                 if (!legacyKey.isNullOrBlank()) {
-                    encryptedKeyStorage.setApiKey(legacyKey)
+                    addApiKey(legacyKey, "WORKING")
                     prefs.remove(KEY_API_KEY)
-                    Log.i(TAG, "Migrated API key to EncryptedKeyStorage and cleared plain entry")
+                    Log.i(TAG, "Migrated legacy API key to pool")
                 }
 
-                // 3. Persona migration: Migrate legacy full persona string to extraInstructions once
                 val personaVersion = prefs[KEY_PERSONA_VERSION] ?: 0
                 if (personaVersion < PersonaBuilder.CURRENT_PERSONA_VERSION) {
                     val legacyPersona = prefs[KEY_SYSTEM_INSTRUCTION]
                     if (!legacyPersona.isNullOrBlank()) {
-                        // If it differs from the old hardcoded default, preserve as extra instructions
                         if (!legacyPersona.startsWith("You are Aura, a realtime voice agent for Android")) {
                             prefs[KEY_EXTRA_INSTRUCTIONS] = legacyPersona
                             Log.i(TAG, "Migrated custom system instruction to extraInstructions")
@@ -159,22 +287,6 @@ class AuraPreferences(
         }
     }
 
-    val apiKey: Flow<String> = flow {
-        val encrypted = encryptedKeyStorage.getApiKey()
-        if (encrypted.isNotBlank()) {
-            emit(encrypted)
-        } else {
-            val buildConfigKey = try {
-                val field = BuildConfig::class.java.getField("GEMINI_API_KEY")
-                val key = field.get(null) as? String
-                if (!key.isNullOrBlank() && key != "MY_GEMINI_API_KEY") key else ""
-            } catch (e: Exception) {
-                ""
-            }
-            emit(buildConfigKey)
-        }
-    }
-
     val modelName: Flow<String> = context.dataStore.data.catch { emitDefaults(it) }.map {
         val model = it[KEY_MODEL_NAME]
         if (model.isNullOrBlank() || model == "gemini-2.0-flash-exp" || model == "gemini-live-2.5-flash-preview") {
@@ -184,9 +296,7 @@ class AuraPreferences(
         }
     }
 
-    val voiceName: Flow<String> = context.dataStore.data.catch { emitDefaults(it) }.map {
-        it[KEY_VOICE_NAME] ?: DEFAULT_VOICE
-    }
+    val voiceName: Flow<String> = kotlinx.coroutines.flow.flow { emit(DEFAULT_VOICE) }
 
     val thinkingLevel: Flow<String> = context.dataStore.data.catch { emitDefaults(it) }.map {
         val level = it[KEY_THINKING_LEVEL] ?: DEFAULT_THINKING_LEVEL
@@ -233,8 +343,21 @@ class AuraPreferences(
         it[KEY_WAKE_WORD_SENSITIVITY] ?: "normal"
     }
 
+    // Overlays & Edge Lighting
     val edgeLightingEnabled: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
         it[KEY_EDGE_LIGHTING_ENABLED] ?: true
+    }
+
+    val edgeLightingStyle: Flow<String> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_EDGE_LIGHTING_STYLE] ?: "NEON_RAINBOW"
+    }
+
+    val edgeLightingCometCount: Flow<Int> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_EDGE_LIGHTING_COMET_COUNT] ?: 1
+    }
+
+    val edgeLightingFlowSpeed: Flow<Float> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_EDGE_LIGHTING_FLOW_SPEED] ?: 1.0f
     }
 
     val edgeLightingThickness: Flow<Int> = context.dataStore.data.catch { emitDefaults(it) }.map {
@@ -242,7 +365,7 @@ class AuraPreferences(
     }
 
     val edgeLightingDepthPercent: Flow<Int> = context.dataStore.data.catch { emitDefaults(it) }.map {
-        it[KEY_EDGE_LIGHTING_DEPTH_PERCENT] ?: 22
+        it[KEY_EDGE_LIGHTING_DEPTH_PERCENT] ?: 7
     }
 
     val edgeLightingTheme: Flow<String> = context.dataStore.data.catch { emitDefaults(it) }.map {
@@ -263,6 +386,76 @@ class AuraPreferences(
 
     val floatingCaptionsEnabled: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
         it[KEY_FLOATING_CAPTIONS_ENABLED] ?: true
+    }
+
+    val overlayEnabled: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_OVERLAY_ENABLED] ?: false
+    }
+
+    // Persona
+    val assistantName: Flow<String> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_ASSISTANT_NAME] ?: DEFAULT_ASSISTANT_NAME
+    }
+
+    val selectedPersona: Flow<String> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_SELECTED_PERSONA] ?: DEFAULT_PERSONA
+    }
+
+    val relationshipStyle: Flow<String> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_RELATIONSHIP_STYLE] ?: "girlfriend"
+    }
+
+    val ownerName: Flow<String> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_OWNER_NAME] ?: DEFAULT_OWNER_NAME
+    }
+
+    val extraInstructions: Flow<String> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_EXTRA_INSTRUCTIONS] ?: ""
+    }
+
+    fun getPersonaCustomPrompt(persona: String): Flow<String> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        when (persona.lowercase()) {
+            "maya" -> it[KEY_PERSONA_PROMPT_MAYA] ?: ""
+            "friday" -> it[KEY_PERSONA_PROMPT_FRIDAY] ?: ""
+            "venom" -> it[KEY_PERSONA_PROMPT_VENOM] ?: ""
+            "jarvis" -> it[KEY_PERSONA_PROMPT_JARVIS] ?: ""
+            else -> it[KEY_PERSONA_PROMPT_CUSTOM] ?: ""
+        }
+    }
+
+    // Calls
+    val callAnnouncementEnabled: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_CALL_ANNOUNCEMENT_ENABLED] ?: true
+    }
+
+    val callAnnounceWhatsapp: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_CALL_ANNOUNCE_WHATSAPP] ?: true
+    }
+
+    val callAutoAnswerVoice: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_CALL_AUTO_ANSWER_VOICE] ?: true
+    }
+
+    // Screen Lock
+    val screenLockType: Flow<String> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_SCREEN_LOCK_TYPE] ?: "NONE"
+    }
+
+    val savedPatternPoints: Flow<String> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_SAVED_PATTERN_POINTS] ?: ""
+    }
+
+    val savedLockPin: Flow<String> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_SAVED_LOCK_PIN] ?: ""
+    }
+
+    val savedLockPassword: Flow<String> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_SAVED_LOCK_PASSWORD] ?: ""
+    }
+
+    // Safe mode
+    val isSafeModeTriggered: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_SAFE_MODE_TRIGGERED] ?: false
     }
 
     val idleSilenceHangupMinutes: Flow<Int> = context.dataStore.data.catch { emitDefaults(it) }.map {
@@ -292,14 +485,6 @@ class AuraPreferences(
         it[KEY_PLANNER_MAX_TIME_SECONDS] ?: 180
     }
 
-    val ownerName: Flow<String> = context.dataStore.data.catch { emitDefaults(it) }.map {
-        it[KEY_OWNER_NAME] ?: DEFAULT_OWNER_NAME
-    }
-
-    val extraInstructions: Flow<String> = context.dataStore.data.catch { emitDefaults(it) }.map {
-        it[KEY_EXTRA_INSTRUCTIONS] ?: ""
-    }
-
     val includeSystemApps: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
         it[KEY_INCLUDE_SYSTEM_APPS] ?: true
     }
@@ -318,10 +503,6 @@ class AuraPreferences(
 
     val maxAgentSteps: Flow<Int> = context.dataStore.data.catch { emitDefaults(it) }.map {
         it[KEY_MAX_AGENT_STEPS] ?: 25
-    }
-
-    val overlayEnabled: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
-        it[KEY_OVERLAY_ENABLED] ?: false
     }
 
     val themeMode: Flow<String> = context.dataStore.data.catch { emitDefaults(it) }.map {
@@ -363,7 +544,7 @@ class AuraPreferences(
     }
 
     suspend fun setModelName(name: String) = context.dataStore.edit { it[KEY_MODEL_NAME] = name.trim() }
-    suspend fun setVoiceName(voice: String) = context.dataStore.edit { it[KEY_VOICE_NAME] = voice.trim() }
+    suspend fun setVoiceName(voice: String) = context.dataStore.edit { it[KEY_VOICE_NAME] = DEFAULT_VOICE }
     suspend fun setThinkingLevel(level: String) {
         val sanitized = if (level.equals("MINIMAL", ignoreCase = true)) "LOW" else level.uppercase()
         context.dataStore.edit { it[KEY_THINKING_LEVEL] = sanitized }
@@ -378,22 +559,49 @@ class AuraPreferences(
     suspend fun setWakePhraseEnabled(enabled: Boolean) = context.dataStore.edit { it[KEY_WAKE_PHRASE_ENABLED] = enabled }
     suspend fun setWakeWordEngine(engine: String) = context.dataStore.edit { it[KEY_WAKE_WORD_ENGINE] = engine }
     suspend fun setWakeWordSensitivity(sens: String) = context.dataStore.edit { it[KEY_WAKE_WORD_SENSITIVITY] = sens }
+
     suspend fun setEdgeLightingEnabled(enabled: Boolean) = context.dataStore.edit { it[KEY_EDGE_LIGHTING_ENABLED] = enabled }
+    suspend fun setEdgeLightingStyle(style: String) = context.dataStore.edit { it[KEY_EDGE_LIGHTING_STYLE] = style }
+    suspend fun setEdgeLightingCometCount(count: Int) = context.dataStore.edit { it[KEY_EDGE_LIGHTING_COMET_COUNT] = count }
+    suspend fun setEdgeLightingFlowSpeed(speed: Float) = context.dataStore.edit { it[KEY_EDGE_LIGHTING_FLOW_SPEED] = speed }
     suspend fun setEdgeLightingThickness(thickness: Int) = context.dataStore.edit { it[KEY_EDGE_LIGHTING_THICKNESS] = thickness }
-    suspend fun setEdgeLightingDepthPercent(depth: Int) = context.dataStore.edit { it[KEY_EDGE_LIGHTING_DEPTH_PERCENT] = depth.coerceIn(8, 40) }
+    suspend fun setEdgeLightingDepthPercent(depth: Int) = context.dataStore.edit { it[KEY_EDGE_LIGHTING_DEPTH_PERCENT] = depth.coerceIn(2, 30) }
     suspend fun setEdgeLightingTheme(theme: String) = context.dataStore.edit { it[KEY_EDGE_LIGHTING_THEME] = theme }
     suspend fun setEdgeLightingShowInApp(show: Boolean) = context.dataStore.edit { it[KEY_EDGE_LIGHTING_SHOW_IN_APP] = show }
     suspend fun setEdgeLightingShowWake(show: Boolean) = context.dataStore.edit { it[KEY_EDGE_LIGHTING_SHOW_WAKE] = show }
     suspend fun setEdgeLightingIntensity(intensity: Float) = context.dataStore.edit { it[KEY_EDGE_LIGHTING_INTENSITY] = intensity }
     suspend fun setFloatingCaptionsEnabled(enabled: Boolean) = context.dataStore.edit { it[KEY_FLOATING_CAPTIONS_ENABLED] = enabled }
+
+    suspend fun setAssistantName(name: String) = context.dataStore.edit { it[KEY_ASSISTANT_NAME] = name.trim() }
+    suspend fun setSelectedPersona(persona: String) = context.dataStore.edit { it[KEY_SELECTED_PERSONA] = persona.lowercase().trim() }
+    suspend fun setRelationshipStyle(style: String) = context.dataStore.edit { it[KEY_RELATIONSHIP_STYLE] = style.lowercase().trim() }
+    suspend fun setOwnerName(name: String) = context.dataStore.edit { it[KEY_OWNER_NAME] = name }
+    suspend fun setExtraInstructions(instructions: String) = context.dataStore.edit { it[KEY_EXTRA_INSTRUCTIONS] = instructions }
+
+    suspend fun setPersonaCustomPrompt(persona: String, prompt: String) {
+        context.dataStore.edit {
+            when (persona.lowercase()) {
+                "maya" -> it[KEY_PERSONA_PROMPT_MAYA] = prompt
+                "friday" -> it[KEY_PERSONA_PROMPT_FRIDAY] = prompt
+                "venom" -> it[KEY_PERSONA_PROMPT_VENOM] = prompt
+                "jarvis" -> it[KEY_PERSONA_PROMPT_JARVIS] = prompt
+                else -> it[KEY_PERSONA_PROMPT_CUSTOM] = prompt
+            }
+        }
+    }
+
+    suspend fun setCallAnnouncementEnabled(enabled: Boolean) = context.dataStore.edit { it[KEY_CALL_ANNOUNCEMENT_ENABLED] = enabled }
+    suspend fun setCallAnnounceWhatsapp(enabled: Boolean) = context.dataStore.edit { it[KEY_CALL_ANNOUNCE_WHATSAPP] = enabled }
+    suspend fun setCallAutoAnswerVoice(enabled: Boolean) = context.dataStore.edit { it[KEY_CALL_AUTO_ANSWER_VOICE] = enabled }
+
+    suspend fun setSafeModeTriggered(triggered: Boolean) = context.dataStore.edit { it[KEY_SAFE_MODE_TRIGGERED] = triggered }
+
     suspend fun setIdleSilenceHangupMinutes(minutes: Int) = context.dataStore.edit { it[KEY_IDLE_SILENCE_HANGUP_MINUTES] = minutes }
     suspend fun setKeepAliveScreenOff(keepAlive: Boolean) = context.dataStore.edit { it[KEY_KEEP_ALIVE_SCREEN_OFF] = keepAlive }
     suspend fun setScreenOffTimeoutMinutes(minutes: Int) = context.dataStore.edit { it[KEY_SCREEN_OFF_TIMEOUT_MINUTES] = minutes }
     suspend fun setPlannerModelName(model: String) = context.dataStore.edit { it[KEY_PLANNER_MODEL_NAME] = model.trim() }
     suspend fun setPlannerUseScreenshots(use: Boolean) = context.dataStore.edit { it[KEY_PLANNER_USE_SCREENSHOTS] = use }
     suspend fun setPlannerMaxTimeSeconds(seconds: Int) = context.dataStore.edit { it[KEY_PLANNER_MAX_TIME_SECONDS] = seconds }
-    suspend fun setOwnerName(name: String) = context.dataStore.edit { it[KEY_OWNER_NAME] = name }
-    suspend fun setExtraInstructions(instructions: String) = context.dataStore.edit { it[KEY_EXTRA_INSTRUCTIONS] = instructions }
     suspend fun setIncludeSystemApps(include: Boolean) = context.dataStore.edit { it[KEY_INCLUDE_SYSTEM_APPS] = include }
 
     suspend fun recordUnsupportedSetupField(fieldKey: String) {
@@ -418,6 +626,11 @@ class AuraPreferences(
     suspend fun setHeadphonesMode(enabled: Boolean) = context.dataStore.edit { it[KEY_HEADPHONES_MODE] = enabled }
     suspend fun setWhatsappBusiness(enabled: Boolean) = context.dataStore.edit { it[KEY_WHATSAPP_BUSINESS] = enabled }
     suspend fun setOnboardingCompleted(completed: Boolean) = context.dataStore.edit { it[KEY_ONBOARDING_COMPLETED] = completed }
+
+    suspend fun setScreenLockType(type: String) = context.dataStore.edit { it[KEY_SCREEN_LOCK_TYPE] = type }
+    suspend fun setSavedPatternPoints(points: String) = context.dataStore.edit { it[KEY_SAVED_PATTERN_POINTS] = points }
+    suspend fun setSavedLockPin(pin: String) = context.dataStore.edit { it[KEY_SAVED_LOCK_PIN] = pin }
+    suspend fun setSavedLockPassword(password: String) = context.dataStore.edit { it[KEY_SAVED_LOCK_PASSWORD] = password }
 
     suspend fun setToolEnabled(toolName: String, enabled: Boolean) {
         context.dataStore.edit { prefs ->
