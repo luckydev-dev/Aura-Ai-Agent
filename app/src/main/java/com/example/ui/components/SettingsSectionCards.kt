@@ -36,9 +36,8 @@ import com.example.core.root.RootManager
 import com.example.core.settings.AuraPreferences
 import com.example.core.telephony.CallAnnouncementManager
 import com.example.core.tools.AppInventory
-import com.example.ui.overlay.EdgeLightingState
-import com.example.ui.overlay.EdgeLightingView
-import com.example.ui.overlay.EdgeStyle
+import com.example.ui.overlay.CursorSpeed
+import com.example.ui.overlay.CursorStyle
 import com.example.ui.theme.AuraTheme
 import kotlinx.coroutines.launch
 
@@ -355,8 +354,9 @@ fun EdgeLightingSettingsCard(
     val typography = AuraTheme.typography
 
     val edgeEnabled by preferences.edgeLightingEnabled.collectAsState(initial = true)
-    val edgeStyle by preferences.edgeLightingStyle.collectAsState(initial = "NEON_RAINBOW")
-    val flowSpeed by preferences.edgeLightingFlowSpeed.collectAsState(initial = 1.0f)
+    val showInApp by preferences.edgeLightingShowInApp.collectAsState(initial = true)
+    val intensity by preferences.edgeLightingIntensity.collectAsState(initial = 1.0f)
+    val thickness by preferences.edgeLightingThickness.collectAsState(initial = 8)
 
     Card(
         shape = RoundedCornerShape(20.dp),
@@ -381,11 +381,16 @@ fun EdgeLightingSettingsCard(
                     modifier = Modifier.size(22.dp)
                 )
                 Spacer(modifier = Modifier.width(10.dp))
-                Text(
-                    text = "Neon Edge Lighting",
-                    style = typography.titleMedium.copy(color = colors.textPrimary),
-                    modifier = Modifier.weight(1f)
-                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Original Screen Edge Lighting",
+                        style = typography.titleMedium.copy(color = colors.textPrimary)
+                    )
+                    Text(
+                        text = "Glowing rotating ring along the phone border when Maya is speaking or listening.",
+                        style = typography.bodySmall.copy(color = colors.textSecondary)
+                    )
+                }
                 Switch(
                     checked = edgeEnabled,
                     onCheckedChange = { scope.launch { preferences.setEdgeLightingEnabled(it) } }
@@ -393,69 +398,186 @@ fun EdgeLightingSettingsCard(
             }
 
             if (edgeEnabled) {
-                Spacer(modifier = Modifier.height(14.dp))
+                Spacer(modifier = Modifier.height(16.dp))
 
-                // Live Preview Box
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(80.dp)
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(Color.Black)
-                        .border(1.dp, Color(0xFF282C3D), RoundedCornerShape(16.dp))
+                // Show In App toggle
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    androidx.compose.ui.viewinterop.AndroidView(
-                        factory = { ctx ->
-                            EdgeLightingView(ctx).apply {
-                                style = if (edgeStyle.equals("SOFT_GRADIENT", ignoreCase = true)) EdgeStyle.SOFT_GRADIENT else EdgeStyle.NEON_RAINBOW
-                                flowSpeedMultiplier = flowSpeed
-                                setState(EdgeLightingState.SPEAKING)
-                            }
-                        },
-                        update = { view ->
-                            view.style = if (edgeStyle.equals("SOFT_GRADIENT", ignoreCase = true)) EdgeStyle.SOFT_GRADIENT else EdgeStyle.NEON_RAINBOW
-                            view.flowSpeedMultiplier = flowSpeed
-                        },
-                        modifier = Modifier.fillMaxSize()
-                    )
-                    Text(
-                        text = "NEON EDGE PREVIEW",
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White.copy(alpha = 0.7f),
-                        modifier = Modifier
-                            .align(Alignment.Center)
-                            .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(6.dp))
-                            .padding(horizontal = 8.dp, vertical = 2.dp)
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Show In-App Glow",
+                            style = typography.labelMedium.copy(color = colors.textPrimary)
+                        )
+                        Text(
+                            text = "Keep glowing border visible even while inside the Aura app.",
+                            style = typography.bodySmall.copy(color = colors.textSecondary)
+                        )
+                    }
+                    Switch(
+                        checked = showInApp,
+                        onCheckedChange = { scope.launch { preferences.setEdgeLightingShowInApp(it) } }
                     )
                 }
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                // Style Selector: Neon Rainbow vs Soft Glow
-                Text("Style Preset", style = typography.labelMedium.copy(color = colors.textPrimary))
+                // Intensity Slider
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Glow Intensity", style = typography.labelMedium.copy(color = colors.textPrimary))
+                    Text(
+                        "${(intensity * 100).toInt()}%",
+                        style = typography.labelSmall.copy(color = colors.accentStart, fontWeight = FontWeight.Bold)
+                    )
+                }
+                Slider(
+                    value = intensity,
+                    onValueChange = { scope.launch { preferences.setEdgeLightingIntensity(it) } },
+                    valueRange = 0.2f..1.5f,
+                    colors = SliderDefaults.colors(
+                        thumbColor = colors.accentStart,
+                        activeTrackColor = colors.accentStart
+                    )
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Thickness Slider
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Border Thickness", style = typography.labelMedium.copy(color = colors.textPrimary))
+                    Text(
+                        "${thickness} dp",
+                        style = typography.labelSmall.copy(color = colors.accentStart, fontWeight = FontWeight.Bold)
+                    )
+                }
+                Slider(
+                    value = thickness.toFloat(),
+                    onValueChange = { scope.launch { preferences.setEdgeLightingThickness(it.toInt()) } },
+                    valueRange = 4f..24f,
+                    steps = 19,
+                    colors = SliderDefaults.colors(
+                        thumbColor = colors.accentStart,
+                        activeTrackColor = colors.accentStart
+                    )
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun AgentCursorSettingsCard(
+    preferences: AuraPreferences,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val colors = AuraTheme.colors
+    val typography = AuraTheme.typography
+
+    val cursorEnabled by preferences.agentCursorEnabled.collectAsState(initial = true)
+    val cursorStyle by preferences.agentCursorStyle.collectAsState(initial = "ARROW")
+    val cursorSpeed by preferences.agentCursorSpeed.collectAsState(initial = "NORMAL")
+    val cursorSize by preferences.agentCursorSizeDp.collectAsState(initial = 26f)
+    val showTrail by preferences.agentCursorTrail.collectAsState(initial = true)
+    val showRipple by preferences.agentCursorRipple.collectAsState(initial = true)
+    val showLabel by preferences.agentCursorActionLabel.collectAsState(initial = true)
+    val showUnlock by preferences.showCursorDuringUnlock.collectAsState(initial = false)
+
+    fun triggerCursorPreview(
+        previewStyle: CursorStyle? = null,
+        previewSpeed: CursorSpeed? = null,
+        previewSize: Float? = null
+    ) {
+        val controller = com.example.service.AuraForegroundService.currentService?.overlayController
+        val cursorOverlay = controller?.agentCursorOverlay
+            ?: com.example.ui.overlay.AgentCursorOverlay(context, com.example.AuraApplication.instance.inputController)
+        cursorOverlay.previewAnimation(previewStyle, previewSpeed, previewSize)
+    }
+
+    Card(
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = colors.surface),
+        modifier = modifier
+            .fillMaxWidth()
+            .border(1.dp, colors.border, RoundedCornerShape(20.dp))
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(18.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Agent Mouse Pointer Cursor",
+                        style = typography.titleMedium.copy(color = colors.textPrimary)
+                    )
+                    Text(
+                        text = "Visible mouse cursor showing where the AI is touching, typing, and swiping in real time.",
+                        style = typography.bodySmall.copy(color = colors.textSecondary)
+                    )
+                }
+                Switch(
+                    checked = cursorEnabled,
+                    onCheckedChange = {
+                        scope.launch {
+                            preferences.setAgentCursorEnabled(it)
+                            if (it) triggerCursorPreview()
+                        }
+                    }
+                )
+            }
+
+            if (cursorEnabled) {
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // Cursor Style: Arrow vs Dot vs Hand
+                Text("Cursor Style", style = typography.labelMedium.copy(color = colors.textPrimary))
                 Spacer(modifier = Modifier.height(8.dp))
                 Row(
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    listOf("NEON_RAINBOW" to "Neon Rainbow (Default)", "SOFT_GRADIENT" to "Soft Glow").forEach { (styleKey, title) ->
-                        val isSelected = edgeStyle.equals(styleKey, ignoreCase = true)
+                    listOf("ARROW" to "Arrow 🏹", "DOT" to "Dot ⚪", "HAND" to "Hand 👆").forEach { (styleKey, title) ->
+                        val isSelected = cursorStyle.equals(styleKey, ignoreCase = true)
                         Box(
                             modifier = Modifier
                                 .weight(1f)
                                 .clip(RoundedCornerShape(12.dp))
-                                .background(if (isSelected) Color(0xFF233256) else Color(0xFF141724))
-                                .border(1.dp, if (isSelected) Color(0xFF00F0FF) else Color(0xFF282C3D), RoundedCornerShape(12.dp))
-                                .clickable { scope.launch { preferences.setEdgeLightingStyle(styleKey) } }
-                                .padding(vertical = 12.dp),
+                                .background(if (isSelected) colors.accentStart.copy(alpha = 0.2f) else colors.surfaceRaised)
+                                .border(1.dp, if (isSelected) colors.accentStart else colors.border, RoundedCornerShape(12.dp))
+                                .clickable {
+                                    scope.launch {
+                                        preferences.setAgentCursorStyle(styleKey)
+                                        val s = when (styleKey) {
+                                            "DOT" -> CursorStyle.DOT
+                                            "HAND" -> CursorStyle.HAND
+                                            else -> CursorStyle.ARROW
+                                        }
+                                        triggerCursorPreview(previewStyle = s)
+                                    }
+                                }
+                                .padding(vertical = 10.dp),
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
                                 text = title,
                                 fontSize = 12.sp,
                                 fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                                color = if (isSelected) Color.White else Color(0xFFA0A5B9)
+                                color = if (isSelected) colors.accentStart else colors.textSecondary
                             )
                         }
                     }
@@ -463,34 +585,127 @@ fun EdgeLightingSettingsCard(
 
                 Spacer(modifier = Modifier.height(14.dp))
 
-                // Animation Speed: Normal vs Fast
-                Text("Animation Speed", style = typography.labelMedium.copy(color = colors.textPrimary))
+                // Cursor Speed: Instant vs Fast vs Normal vs Slow
+                Text("Movement Speed", style = typography.labelMedium.copy(color = colors.textPrimary))
                 Spacer(modifier = Modifier.height(8.dp))
                 Row(
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    listOf(1.0f to "Normal Speed", 1.8f to "Fast Speed").forEach { (spVal, spLabel) ->
-                        val isSel = flowSpeed == spVal
+                    listOf("INSTANT" to "Instant", "FAST" to "Fast", "NORMAL" to "Normal", "SLOW" to "Cinematic").forEach { (spKey, title) ->
+                        val isSelected = cursorSpeed.equals(spKey, ignoreCase = true)
                         Box(
                             modifier = Modifier
                                 .weight(1f)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(if (isSel) Color(0xFF233256) else Color(0xFF141724))
-                                .border(1.dp, if (isSel) Color(0xFF00F0FF) else Color(0xFF282C3D), RoundedCornerShape(12.dp))
-                                .clickable { scope.launch { preferences.setEdgeLightingFlowSpeed(spVal) } }
-                                .padding(vertical = 10.dp),
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(if (isSelected) colors.accentStart.copy(alpha = 0.2f) else colors.surfaceRaised)
+                                .border(1.dp, if (isSelected) colors.accentStart else colors.border, RoundedCornerShape(10.dp))
+                                .clickable {
+                                    scope.launch {
+                                        preferences.setAgentCursorSpeed(spKey)
+                                        val sp = when (spKey) {
+                                            "INSTANT" -> CursorSpeed.INSTANT
+                                            "FAST" -> CursorSpeed.FAST
+                                            "SLOW" -> CursorSpeed.SLOW
+                                            else -> CursorSpeed.NORMAL
+                                        }
+                                        triggerCursorPreview(previewSpeed = sp)
+                                    }
+                                }
+                                .padding(vertical = 8.dp),
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
-                                text = spLabel,
-                                fontSize = 12.sp,
-                                fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal,
-                                color = if (isSel) Color.White else Color(0xFFA0A5B9)
+                                text = title,
+                                fontSize = 11.sp,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                color = if (isSelected) colors.accentStart else colors.textSecondary
                             )
                         }
                     }
                 }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // Size Slider
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Cursor Size", style = typography.labelMedium.copy(color = colors.textPrimary))
+                    Text(
+                        "${cursorSize.toInt()} dp",
+                        style = typography.labelSmall.copy(color = colors.accentStart, fontWeight = FontWeight.Bold)
+                    )
+                }
+                Slider(
+                    value = cursorSize,
+                    onValueChange = { scope.launch { preferences.setAgentCursorSizeDp(it) } },
+                    onValueChangeFinished = { triggerCursorPreview(previewSize = cursorSize) },
+                    valueRange = 18f..42f,
+                    colors = SliderDefaults.colors(
+                        thumbColor = colors.accentStart,
+                        activeTrackColor = colors.accentStart
+                    )
+                )
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Visual effect toggles
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Motion Trails", style = typography.bodySmall.copy(color = colors.textPrimary))
+                    Switch(checked = showTrail, onCheckedChange = { scope.launch { preferences.setAgentCursorTrail(it) } })
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Tap Ripples", style = typography.bodySmall.copy(color = colors.textPrimary))
+                    Switch(checked = showRipple, onCheckedChange = { scope.launch { preferences.setAgentCursorRipple(it) } })
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Action Label Pills", style = typography.bodySmall.copy(color = colors.textPrimary))
+                    Switch(checked = showLabel, onCheckedChange = { scope.launch { preferences.setAgentCursorActionLabel(it) } })
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Show During Phone Unlock", style = typography.bodySmall.copy(color = colors.textPrimary))
+                    Switch(checked = showUnlock, onCheckedChange = { scope.launch { preferences.setShowCursorDuringUnlock(it) } })
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // Demo Test Button
+                AuraButton(
+                    text = "🎯 Test Agent Cursor Demo",
+                    onClick = {
+                        val controller = com.example.service.AuraForegroundService.currentService?.overlayController
+                        if (controller != null) {
+                            controller.agentCursorOverlay.testDemo()
+                        } else {
+                            val cursorOverlay = com.example.ui.overlay.AgentCursorOverlay(
+                                context,
+                                com.example.AuraApplication.instance.inputController
+                            )
+                            cursorOverlay.testDemo()
+                        }
+                    },
+                    isPrimary = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
             }
         }
     }

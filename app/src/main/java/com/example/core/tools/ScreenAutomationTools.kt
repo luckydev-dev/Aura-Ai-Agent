@@ -25,6 +25,8 @@ class ScreenAutomationTools(
     private val preferences: AuraPreferences,
     private val appInventory: AppInventory = AppInventory(context, rootManager)
 ) {
+    private val inputController by lazy { com.example.AuraApplication.instance.inputController }
+
     companion object {
         private const val TAG = "AuraScreenTools"
     }
@@ -103,8 +105,8 @@ class ScreenAutomationTools(
             }
 
             return if (match != null) {
-                rootManager.execute("input tap ${match.centerX} ${match.centerY}")
-                ToolExecutionResult(true, "Tapped '${match.text.ifEmpty { match.contentDescription }}' at (${match.centerX}, ${match.centerY})")
+                val ok = inputController.tap(match.centerX.toFloat(), match.centerY.toFloat(), "Tap ${match.text.ifEmpty { match.contentDescription }}")
+                ToolExecutionResult(ok, "Tapped '${match.text.ifEmpty { match.contentDescription }}' at (${match.centerX}, ${match.centerY})")
             } else {
                 ToolExecutionResult(false, "Could not find element matching '$query' on current screen")
             }
@@ -124,10 +126,10 @@ class ScreenAutomationTools(
         )
 
         override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
-            val x = (args["x"] as? Number)?.toInt() ?: return ToolExecutionResult(false, "Missing x")
-            val y = (args["y"] as? Number)?.toInt() ?: return ToolExecutionResult(false, "Missing y")
-            val res = rootManager.execute("input tap $x $y")
-            return ToolExecutionResult(res.success, if (res.success) "Tapped at ($x, $y)" else res.stderr)
+            val x = (args["x"] as? Number)?.toFloat() ?: return ToolExecutionResult(false, "Missing x")
+            val y = (args["y"] as? Number)?.toFloat() ?: return ToolExecutionResult(false, "Missing y")
+            val res = inputController.tap(x, y, "Tap ($x, $y)")
+            return ToolExecutionResult(res, if (res) "Tapped at ($x, $y)" else "Failed to tap ($x, $y)")
         }
     }
 
@@ -145,11 +147,11 @@ class ScreenAutomationTools(
         )
 
         override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
-            val x = (args["x"] as? Number)?.toInt() ?: return ToolExecutionResult(false, "Missing x")
-            val y = (args["y"] as? Number)?.toInt() ?: return ToolExecutionResult(false, "Missing y")
-            val duration = (args["duration_ms"] as? Number)?.toInt() ?: 1000
-            val res = rootManager.execute("input swipe $x $y $x $y $duration")
-            return ToolExecutionResult(res.success, "Long pressed at ($x, $y)")
+            val x = (args["x"] as? Number)?.toFloat() ?: return ToolExecutionResult(false, "Missing x")
+            val y = (args["y"] as? Number)?.toFloat() ?: return ToolExecutionResult(false, "Missing y")
+            val duration = (args["duration_ms"] as? Number)?.toLong() ?: 1000L
+            val res = inputController.longPress(x, y, duration, "Long press")
+            return ToolExecutionResult(res, "Long pressed at ($x, $y)")
         }
     }
 
@@ -166,14 +168,8 @@ class ScreenAutomationTools(
 
         override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
             val dir = args["direction"]?.toString()?.lowercase(Locale.ROOT) ?: "up"
-            val cmd = when (dir) {
-                "down" -> "input swipe 540 600 540 1800 300"
-                "left" -> "input swipe 900 1200 150 1200 300"
-                "right" -> "input swipe 150 1200 900 1200 300"
-                else -> "input swipe 540 1800 540 600 300" // up
-            }
-            val res = rootManager.execute(cmd)
-            return ToolExecutionResult(res.success, "Swiped $dir")
+            val res = inputController.swipeDirection(dir, "Swipe $dir")
+            return ToolExecutionResult(res, "Swiped $dir")
         }
     }
 
@@ -187,9 +183,8 @@ class ScreenAutomationTools(
 
         override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
             val dir = args["direction"]?.toString()?.lowercase(Locale.ROOT) ?: "down"
-            val cmd = if (dir == "up") "input swipe 540 800 540 1600 250" else "input swipe 540 1600 540 800 250"
-            val res = rootManager.execute(cmd)
-            return ToolExecutionResult(res.success, "Scrolled $dir")
+            val res = inputController.scroll(dir, 0.5f, "Scroll $dir")
+            return ToolExecutionResult(res, "Scrolled $dir")
         }
     }
 
@@ -204,27 +199,8 @@ class ScreenAutomationTools(
 
         override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
             val text = args["text"]?.toString() ?: return ToolExecutionResult(false, "Missing text")
-
-            val a11y = AuraAccessibilityService.instance
-            if (a11y != null && a11y.setTextOnActiveNode(text)) {
-                return ToolExecutionResult(true, "Typed text via accessibility: $text")
-            }
-
-            val isAscii = text.all { it.code in 32..126 && it != '"' && it != '\'' && it != '\\' && it != '`' && it != '$' }
-
-            return if (isAscii) {
-                val escaped = text.replace(" ", "%s")
-                val res = rootManager.execute("input text \"$escaped\"")
-                ToolExecutionResult(res.success, "Typed: $text")
-            } else {
-                withContext(Dispatchers.Main) {
-                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                    clipboard.setPrimaryClip(ClipData.newPlainText("aura_text", text))
-                }
-                delay(200)
-                rootManager.execute("input keyevent 279 || input keyevent --longpress 279")
-                ToolExecutionResult(true, "Pasted text: $text")
-            }
+            val res = inputController.typeText(text, "Type text")
+            return ToolExecutionResult(res, if (res) "Typed: $text" else "Failed to type: $text")
         }
     }
 
@@ -251,8 +227,8 @@ class ScreenAutomationTools(
                 "volume_down" -> 25
                 else -> key.toIntOrNull() ?: 66
             }
-            val res = rootManager.execute("input keyevent $code")
-            return ToolExecutionResult(res.success, "Pressed $key")
+            val res = inputController.pressKey(code, "Key $key")
+            return ToolExecutionResult(res, "Pressed $key")
         }
     }
 
@@ -353,7 +329,7 @@ class ScreenAutomationTools(
                         // 3. Loop guard
                         if (agentPlanner.isRepeatingLoop(history)) {
                             Log.w(TAG, "Repeating loop detected. Attempting to scroll or press back...")
-                            rootManager.execute("input keyevent 4")
+                            inputController.pressKey(4, "Back")
                             delay(500)
                         }
 
@@ -397,7 +373,7 @@ class ScreenAutomationTools(
                                 val idx = (decision.params["index"] as? Number)?.toInt() ?: 1
                                 val targetNode = nodes.find { it.index == idx }
                                 if (targetNode != null) {
-                                    rootManager.execute("input tap ${targetNode.centerX} ${targetNode.centerY}")
+                                    inputController.tap(targetNode.centerX.toFloat(), targetNode.centerY.toFloat(), "Tap #${targetNode.index}")
                                     executionResultMsg = "Tapped node #$idx (${targetNode.text})"
                                 } else {
                                     executionResultMsg = "Node #$idx not found"
@@ -410,22 +386,22 @@ class ScreenAutomationTools(
                                     it.contentDescription.contains(query, ignoreCase = true)
                                 }
                                 if (targetNode != null) {
-                                    rootManager.execute("input tap ${targetNode.centerX} ${targetNode.centerY}")
+                                    inputController.tap(targetNode.centerX.toFloat(), targetNode.centerY.toFloat(), "Tap $query")
                                     executionResultMsg = "Tapped '$query' at (${targetNode.centerX}, ${targetNode.centerY})"
                                 } else {
                                     executionResultMsg = "Text '$query' not found"
                                 }
                             }
                             "tap_xy" -> {
-                                val x = (decision.params["x"] as? Number)?.toInt() ?: 540
-                                val y = (decision.params["y"] as? Number)?.toInt() ?: 1200
-                                rootManager.execute("input tap $x $y")
+                                val x = (decision.params["x"] as? Number)?.toFloat() ?: 540f
+                                val y = (decision.params["y"] as? Number)?.toFloat() ?: 1200f
+                                inputController.tap(x, y, "Tap ($x, $y)")
                                 executionResultMsg = "Tapped ($x, $y)"
                             }
                             "long_press" -> {
-                                val x = (decision.params["x"] as? Number)?.toInt() ?: 540
-                                val y = (decision.params["y"] as? Number)?.toInt() ?: 1200
-                                rootManager.execute("input swipe $x $y $x $y 1000")
+                                val x = (decision.params["x"] as? Number)?.toFloat() ?: 540f
+                                val y = (decision.params["y"] as? Number)?.toFloat() ?: 1200f
+                                inputController.longPress(x, y, 1000L, "Long press")
                                 executionResultMsg = "Long pressed ($x, $y)"
                             }
                             "type_text" -> {
@@ -439,23 +415,23 @@ class ScreenAutomationTools(
                                 executionResultMsg = "Scrolled $dir"
                             }
                             "swipe" -> {
-                                val x1 = (decision.params["x1"] as? Number)?.toInt() ?: 540
-                                val y1 = (decision.params["y1"] as? Number)?.toInt() ?: 1800
-                                val x2 = (decision.params["x2"] as? Number)?.toInt() ?: 540
-                                val y2 = (decision.params["y2"] as? Number)?.toInt() ?: 600
-                                rootManager.execute("input swipe $x1 $y1 $x2 $y2 300")
+                                val x1 = (decision.params["x1"] as? Number)?.toFloat() ?: 540f
+                                val y1 = (decision.params["y1"] as? Number)?.toFloat() ?: 1800f
+                                val x2 = (decision.params["x2"] as? Number)?.toFloat() ?: 540f
+                                val y2 = (decision.params["y2"] as? Number)?.toFloat() ?: 600f
+                                inputController.swipe(x1, y1, x2, y2, 300L, "Swipe")
                                 executionResultMsg = "Swiped ($x1, $y1) to ($x2, $y2)"
                             }
                             "back" -> {
-                                rootManager.execute("input keyevent 4")
+                                inputController.pressKey(4, "Back")
                                 executionResultMsg = "Pressed back"
                             }
                             "home" -> {
-                                rootManager.execute("input keyevent 3")
+                                inputController.pressKey(3, "Home")
                                 executionResultMsg = "Pressed home"
                             }
                             "recents" -> {
-                                rootManager.execute("input keyevent 187")
+                                inputController.pressKey(187, "Recents")
                                 executionResultMsg = "Opened recents"
                             }
                             "open_app" -> {

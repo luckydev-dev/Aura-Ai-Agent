@@ -100,11 +100,11 @@ class CommTools(
             }
 
             return if (sendButton != null) {
-                rootManager.execute("input tap ${sendButton.centerX} ${sendButton.centerY}")
-                ToolExecutionResult(true, "Sent WhatsApp message to ${contactInfo?.first ?: phone}")
+                val ok = com.example.AuraApplication.instance.inputController.tap(sendButton.centerX.toFloat(), sendButton.centerY.toFloat(), "Send WhatsApp")
+                ToolExecutionResult(ok, "Sent WhatsApp message to ${contactInfo?.first ?: phone}")
             } else {
-                rootManager.execute("input keyevent 66")
-                ToolExecutionResult(true, "Opened chat with message prefilled and tapped send.")
+                val ok = com.example.AuraApplication.instance.inputController.pressKey(66, "Send")
+                ToolExecutionResult(ok, "Opened chat with message prefilled and tapped send.")
             }
         }
     }
@@ -176,8 +176,7 @@ class CommTools(
         override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
             val cam = CallAnnouncementManager.instance
             val success = cam?.answerCall() ?: run {
-                val res = rootManager.execute("input keyevent 5")
-                res.success
+                com.example.AuraApplication.instance.inputController.pressKey(5, "Answer Call")
             }
             return ToolExecutionResult(success, if (success) "Answered incoming call and released microphone" else "Could not answer call")
         }
@@ -191,8 +190,7 @@ class CommTools(
         override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
             val cam = CallAnnouncementManager.instance
             val success = cam?.rejectCall() ?: run {
-                val res = rootManager.execute("input keyevent 6")
-                res.success
+                com.example.AuraApplication.instance.inputController.pressKey(6, "Reject Call")
             }
             return ToolExecutionResult(success, if (success) "Rejected incoming call" else "Could not reject call")
         }
@@ -237,8 +235,7 @@ class CommTools(
         override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
             val cam = CallAnnouncementManager.instance
             val success = cam?.rejectCall() ?: run {
-                val res = rootManager.execute("input keyevent 6")
-                res.success
+                com.example.AuraApplication.instance.inputController.pressKey(6, "End Call")
             }
             return ToolExecutionResult(success, if (success) "Ended call" else "Could not end call")
         }

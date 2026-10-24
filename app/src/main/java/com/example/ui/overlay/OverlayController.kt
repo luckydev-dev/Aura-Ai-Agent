@@ -17,7 +17,8 @@ class OverlayController(
     private val preferences: AuraPreferences,
     private val overlayManager: OverlayManager,
     private val edgeLightingOverlay: EdgeLightingOverlay,
-    private val floatingCaptionOverlay: FloatingCaptionOverlay = FloatingCaptionOverlay(context)
+    private val floatingCaptionOverlay: FloatingCaptionOverlay = FloatingCaptionOverlay(context),
+    val agentCursorOverlay: AgentCursorOverlay = AgentCursorOverlay(context, AuraApplication.instance.inputController)
 ) {
     companion object {
         private const val TAG = "Aura"
@@ -35,39 +36,15 @@ class OverlayController(
     private var latestCaption = CaptionState()
 
     fun startObserving() {
-        controllerScope.launch {
-            preferences.edgeLightingDepthPercent.collectLatest { depth ->
-                edgeLightingOverlay.setDepthPercent(depth)
-            }
-        }
-        controllerScope.launch {
-            preferences.edgeLightingTheme.collectLatest { theme ->
-                edgeLightingOverlay.setColorTheme(theme)
-            }
-        }
+        // Edge lighting controls
         controllerScope.launch {
             preferences.edgeLightingIntensity.collectLatest { inten ->
                 edgeLightingOverlay.setIntensity(inten)
             }
         }
         controllerScope.launch {
-            preferences.edgeLightingStyle.collectLatest { styleStr ->
-                val style = if (styleStr.equals("SOFT_GRADIENT", ignoreCase = true)) {
-                    EdgeStyle.SOFT_GRADIENT
-                } else {
-                    EdgeStyle.NEON_RAINBOW
-                }
-                edgeLightingOverlay.setStyle(style)
-            }
-        }
-        controllerScope.launch {
-            preferences.edgeLightingCometCount.collectLatest { count ->
-                edgeLightingOverlay.setCometCount(count)
-            }
-        }
-        controllerScope.launch {
-            preferences.edgeLightingFlowSpeed.collectLatest { speed ->
-                edgeLightingOverlay.setFlowSpeed(speed)
+            preferences.edgeLightingThickness.collectLatest { thickness ->
+                edgeLightingOverlay.setThicknessDp(thickness.toFloat())
             }
         }
         controllerScope.launch {
@@ -78,6 +55,60 @@ class OverlayController(
         controllerScope.launch {
             preferences.edgeLightingShowInApp.collectLatest {
                 reEvaluateOverlays(AppForegroundState.current)
+            }
+        }
+
+        // Agent Mouse Cursor observations
+        controllerScope.launch {
+            preferences.agentCursorEnabled.collectLatest { enabled ->
+                agentCursorOverlay.isEnabled = enabled
+                if (!enabled) {
+                    agentCursorOverlay.detachOverlay()
+                }
+            }
+        }
+        controllerScope.launch {
+            preferences.agentCursorStyle.collectLatest { styleStr ->
+                agentCursorOverlay.cursorStyle = when (styleStr.uppercase()) {
+                    "DOT" -> CursorStyle.DOT
+                    "HAND" -> CursorStyle.HAND
+                    else -> CursorStyle.ARROW
+                }
+            }
+        }
+        controllerScope.launch {
+            preferences.agentCursorSizeDp.collectLatest { size ->
+                agentCursorOverlay.cursorSizeDp = size
+            }
+        }
+        controllerScope.launch {
+            preferences.agentCursorSpeed.collectLatest { speedStr ->
+                agentCursorOverlay.cursorSpeed = when (speedStr.uppercase()) {
+                    "INSTANT" -> CursorSpeed.INSTANT
+                    "FAST" -> CursorSpeed.FAST
+                    "SLOW" -> CursorSpeed.SLOW
+                    else -> CursorSpeed.NORMAL
+                }
+            }
+        }
+        controllerScope.launch {
+            preferences.agentCursorTrail.collectLatest { trail ->
+                agentCursorOverlay.showTrail = trail
+            }
+        }
+        controllerScope.launch {
+            preferences.agentCursorRipple.collectLatest { ripple ->
+                agentCursorOverlay.showRipple = ripple
+            }
+        }
+        controllerScope.launch {
+            preferences.agentCursorActionLabel.collectLatest { label ->
+                agentCursorOverlay.showActionLabel = label
+            }
+        }
+        controllerScope.launch {
+            preferences.showCursorDuringUnlock.collectLatest { show ->
+                agentCursorOverlay.showDuringUnlock = show
             }
         }
 
@@ -134,6 +165,7 @@ class OverlayController(
             floatingCaptionOverlay.hideImmediate()
             overlayManager.hideOverlay()
             edgeLightingOverlay.setState(EdgeLightingState.HIDDEN)
+            agentCursorOverlay.hide()
             return
         }
 
@@ -141,17 +173,22 @@ class OverlayController(
         val showEdgeInApp = preferences.edgeLightingShowInApp.first()
         val miniOrbEnabled = preferences.overlayEnabled.first()
         val floatingCaptionsOn = preferences.floatingCaptionsEnabled.first()
+        val cursorEnabled = preferences.agentCursorEnabled.first()
 
         // Auto-grant overlay permission via root if needed
-        if ((edgeEnabled || miniOrbEnabled || floatingCaptionsOn) && !Settings.canDrawOverlays(context)) {
+        if ((edgeEnabled || miniOrbEnabled || floatingCaptionsOn || cursorEnabled) && !Settings.canDrawOverlays(context)) {
             runCatching {
                 com.topjohnwu.superuser.Shell.cmd("appops set ${context.packageName} SYSTEM_ALERT_WINDOW allow").exec()
             }
         }
 
+        if (cursorEnabled) {
+            agentCursorOverlay.show()
+        } else {
+            agentCursorOverlay.hide()
+        }
+
         // 1. Manage Floating Captions & Mini Orb:
-        // Inside Aura app: NO floating captions and NO mini orb
-        // Outside Aura app: appear immediately and disappear when returning to app
         if (isAppInForeground || !isCallActive) {
             floatingCaptionOverlay.hideImmediate()
             overlayManager.hideOverlay()
@@ -192,11 +229,13 @@ class OverlayController(
         edgeLightingOverlay.hide()
         overlayManager.hideOverlay()
         floatingCaptionOverlay.hideImmediate()
+        agentCursorOverlay.hide()
     }
 
     fun destroy() {
         controllerScope.cancel()
         hideAll()
         floatingCaptionOverlay.destroy()
+        agentCursorOverlay.destroy()
     }
 }

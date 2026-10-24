@@ -39,8 +39,11 @@ class MediaUtilityTools(
                 "stop" -> 86
                 else -> 85 // play_pause
             }
-            val res = rootManager.execute("input keyevent $keycode || cmd media_session dispatch $action")
-            return ToolExecutionResult(res.success, "Media: $action")
+            val res = com.example.AuraApplication.instance.inputController.pressKey(keycode, "Media $action")
+            if (!res) {
+                rootManager.execute("cmd media_session dispatch $action")
+            }
+            return ToolExecutionResult(true, "Media: $action")
         }
     }
 

@@ -277,8 +277,8 @@ class AppTools(
         override val description = "Navigates to the Android home screen."
         override val parametersSchema = mapOf("type" to "object", "properties" to emptyMap<String, Any>())
         override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
-            val res = rootManager.execute("input keyevent 3")
-            return ToolExecutionResult(res.success, if (res.success) "Navigated to home" else res.stderr)
+            val res = com.example.AuraApplication.instance.inputController.pressKey(3, "Home")
+            return ToolExecutionResult(res, if (res) "Navigated to home" else "Failed to navigate home")
         }
     }
 
@@ -287,8 +287,8 @@ class AppTools(
         override val description = "Performs back navigation button press."
         override val parametersSchema = mapOf("type" to "object", "properties" to emptyMap<String, Any>())
         override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
-            val res = rootManager.execute("input keyevent 4")
-            return ToolExecutionResult(res.success, if (res.success) "Went back" else res.stderr)
+            val res = com.example.AuraApplication.instance.inputController.pressKey(4, "Back")
+            return ToolExecutionResult(res, if (res) "Went back" else "Failed to go back")
         }
     }
 
@@ -297,8 +297,8 @@ class AppTools(
         override val description = "Opens the Android app switcher / recents menu."
         override val parametersSchema = mapOf("type" to "object", "properties" to emptyMap<String, Any>())
         override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
-            val res = rootManager.execute("input keyevent 187")
-            return ToolExecutionResult(res.success, if (res.success) "Opened recents" else res.stderr)
+            val res = com.example.AuraApplication.instance.inputController.pressKey(187, "Recents")
+            return ToolExecutionResult(res, if (res) "Opened recents" else "Failed to open recents")
         }
     }
 
@@ -327,8 +327,12 @@ class AppTools(
         override val description = "Locks the device screen."
         override val parametersSchema = mapOf("type" to "object", "properties" to emptyMap<String, Any>())
         override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
-            val res = rootManager.execute("input keyevent 26")
-            return ToolExecutionResult(res.success, if (res.success) "Screen locked" else res.stderr)
+            val a11y = com.example.service.AuraAccessibilityService.instance
+            if (a11y?.lockDevice() == true) {
+                return ToolExecutionResult(true, "Screen locked via accessibility")
+            }
+            val res = com.example.AuraApplication.instance.inputController.pressKey(223, "Lock Screen") // KEYCODE_SLEEP
+            return ToolExecutionResult(res, if (res) "Screen locked" else "Failed to lock screen")
         }
     }
 
@@ -337,8 +341,8 @@ class AppTools(
         override val description = "Wakes up the device screen."
         override val parametersSchema = mapOf("type" to "object", "properties" to emptyMap<String, Any>())
         override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
-            val res = rootManager.execute("input keyevent 224")
-            return ToolExecutionResult(res.success, if (res.success) "Screen awakened" else res.stderr)
+            val res = com.example.AuraApplication.instance.inputController.pressKey(224, "Wake Screen") // KEYCODE_WAKEUP
+            return ToolExecutionResult(res, if (res) "Screen awakened" else "Failed to wake screen")
         }
     }
 

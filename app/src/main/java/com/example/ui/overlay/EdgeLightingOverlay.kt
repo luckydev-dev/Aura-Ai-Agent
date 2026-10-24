@@ -7,6 +7,9 @@ import android.provider.Settings
 import android.util.Log
 import android.view.WindowManager
 
+/**
+ * Manages the original screen-edge lighting overlay window.
+ */
 class EdgeLightingOverlay(private val context: Context) {
 
     companion object {
@@ -17,12 +20,8 @@ class EdgeLightingOverlay(private val context: Context) {
     private var edgeView: EdgeLightingView? = null
     private var isOverlayAttached = false
 
-    private var currentStyle: EdgeStyle = EdgeStyle.NEON_RAINBOW
-    private var currentCometCount: Int = 1
-    private var currentFlowSpeed: Float = 1.0f
-    private var currentDepthPercent = 7
     private var currentIntensity = 1.0f
-    private var currentColorTheme = "Aura"
+    private var currentThicknessDp = 8f
 
     fun show(): Boolean {
         var result = false
@@ -64,12 +63,8 @@ class EdgeLightingOverlay(private val context: Context) {
             }
 
             val view = EdgeLightingView(context).apply {
-                style = currentStyle
-                cometCount = currentCometCount
-                flowSpeedMultiplier = currentFlowSpeed
-                depthPercent = currentDepthPercent
                 intensity = currentIntensity
-                colorTheme = currentColorTheme
+                strokeThicknessDp = currentThicknessDp
             }
             windowManager.addView(view, params)
             edgeView = view
@@ -95,34 +90,6 @@ class EdgeLightingOverlay(private val context: Context) {
         }
     }
 
-    fun setStyle(style: EdgeStyle) {
-        OverlayGuard.run("edge_lighting", context) {
-            currentStyle = style
-            edgeView?.style = style
-        }
-    }
-
-    fun setCometCount(count: Int) {
-        OverlayGuard.run("edge_lighting", context) {
-            currentCometCount = count
-            edgeView?.cometCount = count
-        }
-    }
-
-    fun setFlowSpeed(speed: Float) {
-        OverlayGuard.run("edge_lighting", context) {
-            currentFlowSpeed = speed
-            edgeView?.flowSpeedMultiplier = speed
-        }
-    }
-
-    fun setDepthPercent(depth: Int) {
-        OverlayGuard.run("edge_lighting", context) {
-            currentDepthPercent = depth
-            edgeView?.depthPercent = depth
-        }
-    }
-
     fun setIntensity(intensity: Float) {
         OverlayGuard.run("edge_lighting", context) {
             currentIntensity = intensity
@@ -130,26 +97,29 @@ class EdgeLightingOverlay(private val context: Context) {
         }
     }
 
-    fun setColorTheme(theme: String) {
+    fun setThicknessDp(thicknessDp: Float) {
         OverlayGuard.run("edge_lighting", context) {
-            currentColorTheme = theme
-            edgeView?.colorTheme = theme
+            currentThicknessDp = thicknessDp
+            edgeView?.strokeThicknessDp = thicknessDp
         }
     }
 
     fun hide() {
+        setState(EdgeLightingState.HIDDEN)
+    }
+
+    fun destroy() {
         OverlayGuard.run("edge_lighting", context) {
-            if (!isOverlayAttached || edgeView == null) return@run
-            try {
-                edgeView?.setState(EdgeLightingState.HIDDEN)
-                windowManager.removeView(edgeView)
-                edgeView?.release()
-            } catch (e: Exception) {
-                Log.e(TAG, "Error detaching EdgeLightingOverlay: ${e.message}", e)
-            } finally {
-                edgeView = null
-                isOverlayAttached = false
-                Log.i(TAG, "EdgeLightingOverlay detached")
+            if (isOverlayAttached && edgeView != null) {
+                try {
+                    edgeView?.release()
+                    windowManager.removeView(edgeView)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error removing EdgeLightingOverlay", e)
+                } finally {
+                    edgeView = null
+                    isOverlayAttached = false
+                }
             }
         }
     }

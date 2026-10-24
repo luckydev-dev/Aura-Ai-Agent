@@ -408,8 +408,8 @@ class DeviceTools(
                 "stop" -> 86
                 else -> 85 // KEYCODE_MEDIA_PLAY_PAUSE
             }
-            val res = rootManager.execute("input keyevent $keycode")
-            return ToolExecutionResult(res.success, "Media playback $action executed")
+            val res = com.example.AuraApplication.instance.inputController.pressKey(keycode, "Media $action")
+            return ToolExecutionResult(res, "Media playback $action executed")
         }
     }
 
@@ -471,34 +471,15 @@ class DeviceTools(
 
     val unlockPhoneTool = object : Tool {
         override val name = "unlock_phone"
-        override val description = "Wakes up and unlocks the phone screen using owner's configured credentials (pattern, PIN, or password) via accessibility service automation."
+        override val description = "Wakes up and unlocks the phone screen using owner's configured credentials (pattern, PIN, or password) via verified root/accessibility state machine."
         override val parametersSchema = mapOf("type" to "object", "properties" to emptyMap<String, Any>())
 
         override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
-            val a11y = AuraAccessibilityService.instance
-            if (a11y == null) {
-                return ToolExecutionResult(false, "Accessibility Service is not enabled. Please enable it in Settings > Permissions.")
-            }
-            val prefs = AuraPreferences(context)
-            val lockType = prefs.screenLockType.first()
-            val patternPts = prefs.savedPatternPoints.first()
-            val pin = prefs.savedLockPin.first()
-            val pass = prefs.savedLockPassword.first()
-
-            return kotlinx.coroutines.suspendCancellableCoroutine { continuation ->
-                a11y.executeAutoUnlock(lockType, patternPts, pin, pass) { success ->
-                    if (continuation.isActive) {
-                        continuation.resumeWith(
-                            Result.success(
-                                ToolExecutionResult(
-                                    success,
-                                    if (success) "Phone screen unlocked successfully" else "Failed to unlock phone screen"
-                                )
-                            )
-                        )
-                    }
-                }
-            }
+            val unlockManager = com.example.core.unlock.UnlockManager.getInstance(context)
+            val result = unlockManager.executeUnlock(dryRunOnlyBouncer = false)
+            val isSuccess = result.status == com.example.core.unlock.UnlockStatus.UNLOCKED ||
+                            result.status == com.example.core.unlock.UnlockStatus.ALREADY_UNLOCKED
+            return ToolExecutionResult(isSuccess, result.humanMessage)
         }
     }
 
@@ -510,12 +491,11 @@ class DeviceTools(
         override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
             val a11y = AuraAccessibilityService.instance
             val locked = a11y?.lockDevice() ?: false
-            return if (locked) {
-                ToolExecutionResult(true, "Phone screen locked successfully")
-            } else {
-                val res = rootManager.execute("input keyevent 26")
-                ToolExecutionResult(res.success, if (res.success) "Screen turned off" else "Could not lock screen: Accessibility service inactive")
+            if (locked) {
+                return ToolExecutionResult(true, "Phone screen locked successfully")
             }
+            val res = com.example.AuraApplication.instance.inputController.pressKey(223, "Lock Screen") // KEYCODE_SLEEP
+            return ToolExecutionResult(res, if (res) "Phone screen locked" else "Could not lock screen")
         }
     }
 

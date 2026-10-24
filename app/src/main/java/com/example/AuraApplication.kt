@@ -25,6 +25,9 @@ class AuraApplication : Application(), Application.ActivityLifecycleCallbacks {
 
     val liveDiagnostics = LiveDiagnostics()
 
+    val rootManager by lazy { com.example.core.root.RootManager(this) }
+    val inputController by lazy { com.example.core.input.InputController.getInstance(this, rootManager) }
+
     lateinit var overlayManager: OverlayManager
         private set
 
@@ -55,6 +58,14 @@ class AuraApplication : Application(), Application.ActivityLifecycleCallbacks {
         com.example.core.root.RootManager.ensureConfigured()
 
         overlayManager = OverlayManager(this)
+
+        appScope.launch {
+            try {
+                AuraPreferences(this@AuraApplication).migrateLegacyCredentialsAndEdgeLighting()
+            } catch (e: Exception) {
+                Log.e(TAG, "Error running legacy migration: ${e.message}", e)
+            }
+        }
     }
 
     private fun checkCrashHistoryAndSafeMode() {

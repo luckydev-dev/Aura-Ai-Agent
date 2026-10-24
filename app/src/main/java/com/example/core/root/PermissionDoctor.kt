@@ -331,6 +331,58 @@ class PermissionDoctor(
     }
 
     /**
+     * One-tap master root fixer: grants all runtime permissions, enables services,
+     * whitelist battery, enables overlays, and applies OEM fixes.
+     */
+    suspend fun fixAll(): Boolean = withContext(Dispatchers.IO) {
+        val pkg = context.packageName
+        var allSuccess = true
+
+        try {
+            // 1. Overlays
+            rootManager.execute("appops set $pkg SYSTEM_ALERT_WINDOW allow")
+
+            // 2. Battery optimization
+            rootManager.execute("dumpsys deviceidle whitelist +$pkg")
+
+            // 3. Runtime permissions
+            val permissionsToGrant = mutableListOf(
+                "android.permission.RECORD_AUDIO",
+                "android.permission.CAMERA",
+                "android.permission.READ_CONTACTS",
+                "android.permission.CALL_PHONE",
+                "android.permission.SEND_SMS",
+                "android.permission.READ_SMS",
+                "android.permission.READ_CALL_LOG",
+                "android.permission.ACCESS_FINE_LOCATION",
+                "android.permission.ACCESS_COARSE_LOCATION"
+            )
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                permissionsToGrant.add("android.permission.POST_NOTIFICATIONS")
+            }
+
+            for (perm in permissionsToGrant) {
+                grantRuntimePermission(perm)
+            }
+
+            // 4. Accessibility service
+            fixAccessibilityService()
+
+            // 5. Notification listener
+            fixNotificationListener()
+
+            // 6. OEM background fixes
+            applyOemFixes()
+
+            _lastReport.value = "All permissions granted & services enabled via Root"
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "fixAll failed: ${e.message}", e)
+            false
+        }
+    }
+
+    /**
      * Builds structured JSON string for model responses.
      */
     fun buildStructuredJson(

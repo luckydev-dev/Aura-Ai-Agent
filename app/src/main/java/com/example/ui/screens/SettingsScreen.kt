@@ -51,9 +51,6 @@ import com.example.service.AuraAccessibilityService
 import com.example.service.AuraForegroundService
 import com.example.service.AuraNotificationListener
 import com.example.ui.components.*
-import com.example.ui.overlay.EdgeLightingState
-import com.example.ui.overlay.EdgeLightingView
-import com.example.ui.overlay.EdgeStyle
 import com.example.ui.theme.AuraTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -117,9 +114,7 @@ fun SettingsScreen(
     val voskStatus by voskModelManager.status.collectAsState()
 
     val edgeLightingEnabled by preferences.edgeLightingEnabled.collectAsState(initial = true)
-    val edgeLightingStyle by preferences.edgeLightingStyle.collectAsState(initial = "NEON_RAINBOW")
-    val edgeLightingFlowSpeed by preferences.edgeLightingFlowSpeed.collectAsState(initial = 1.0f)
-    val edgeLightingDepth by preferences.edgeLightingDepthPercent.collectAsState(initial = 22)
+    val edgeLightingThickness by preferences.edgeLightingThickness.collectAsState(initial = 8)
     val edgeLightingShowInApp by preferences.edgeLightingShowInApp.collectAsState(initial = true)
     val edgeLightingIntensity by preferences.edgeLightingIntensity.collectAsState(initial = 1.0f)
     val floatingCaptionsEnabled by preferences.floatingCaptionsEnabled.collectAsState(initial = true)
@@ -155,8 +150,20 @@ fun SettingsScreen(
     var passwordInput by remember(savedLockPassword) { mutableStateOf(savedLockPassword) }
     var passwordConfirmInput by remember { mutableStateOf("") }
 
+    // Pattern calibration state
+    var showPatternCalibrationDialog by remember { mutableStateOf(false) }
+    var calibOffsetY by remember { mutableStateOf(0f) }
+    var calibOffsetX by remember { mutableStateOf(0f) }
+    var calibScale by remember { mutableStateOf(1.0f) }
+
     // Test connection state
     var isTestingConnection by remember { mutableStateOf(false) }
+
+    // Root grant all and unlock testing states
+    var isGrantingAll by remember { mutableStateOf(false) }
+    var isTestingUnlock by remember { mutableStateOf(false) }
+    var unlockStepLog by remember { mutableStateOf<List<String>>(emptyList()) }
+    var unlockResultStatus by remember { mutableStateOf<String?>(null) }
 
     // Model fetching state
     var isFetchingModels by remember { mutableStateOf(false) }
@@ -454,51 +461,12 @@ fun SettingsScreen(
                         }
 
                         SettingsCategory.EDGE_LIGHTING -> {
-                            // TOP REALTIME LIVE EDGE LIGHTING PREVIEW FRAME
                             item {
-                                Card(
-                                    shape = RoundedCornerShape(20.dp),
-                                    colors = CardDefaults.cardColors(containerColor = Color.Black),
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .height(180.dp)
-                                        .border(1.5.dp, Color(0xFF00F0FF), RoundedCornerShape(20.dp))
-                                ) {
-                                    Box(modifier = Modifier.fillMaxSize()) {
-                                        androidx.compose.ui.viewinterop.AndroidView(
-                                            factory = { ctx ->
-                                                EdgeLightingView(ctx).apply {
-                                                    style = if (edgeLightingStyle.equals("SOFT_GRADIENT", ignoreCase = true)) EdgeStyle.SOFT_GRADIENT else EdgeStyle.NEON_RAINBOW
-                                                    flowSpeedMultiplier = edgeLightingFlowSpeed
-                                                    depthPercent = edgeLightingDepth
-                                                    intensity = edgeLightingIntensity
-                                                    setState(EdgeLightingState.SPEAKING)
-                                                }
-                                            },
-                                            update = { view ->
-                                                view.style = if (edgeLightingStyle.equals("SOFT_GRADIENT", ignoreCase = true)) EdgeStyle.SOFT_GRADIENT else EdgeStyle.NEON_RAINBOW
-                                                view.flowSpeedMultiplier = edgeLightingFlowSpeed
-                                                view.depthPercent = edgeLightingDepth
-                                                view.intensity = edgeLightingIntensity
-                                            },
-                                            modifier = Modifier.fillMaxSize()
-                                        )
-                                        Text(
-                                            text = "✨ REALTIME LIVE EDGE GLOW PREVIEW",
-                                            fontSize = 11.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = Color.White.copy(alpha = 0.9f),
-                                            modifier = Modifier
-                                                .align(Alignment.Center)
-                                                .background(Color.Black.copy(alpha = 0.65f), RoundedCornerShape(8.dp))
-                                                .padding(horizontal = 12.dp, vertical = 6.dp)
-                                        )
-                                    }
-                                }
+                                EdgeLightingSettingsCard(preferences = preferences)
                             }
 
                             item {
-                                EdgeLightingSettingsCard(preferences = preferences)
+                                AgentCursorSettingsCard(preferences = preferences)
                             }
 
                             item {
@@ -640,6 +608,12 @@ fun SettingsScreen(
                                                         modifier = Modifier.weight(1f)
                                                     )
                                                     AuraButton(
+                                                        text = "📐 Calibrate",
+                                                        onClick = { showPatternCalibrationDialog = true },
+                                                        isPrimary = true,
+                                                        modifier = Modifier.padding(end = 6.dp)
+                                                    )
+                                                    AuraButton(
                                                         text = "Reset",
                                                         onClick = {
                                                             scope.launch {
@@ -703,10 +677,11 @@ fun SettingsScreen(
                                                             if (points == firstDrawnPattern) {
                                                                 patternLockState = PatternState.SUCCESS
                                                                 patternStatusText = "✓ Pattern confirmed and saved!"
+                                                                val fullPattern = com.example.core.unlock.UnlockManager.applyMiddleDotRule(points)
                                                                 scope.launch {
-                                                                    preferences.setSavedPatternPoints(points.joinToString(","))
+                                                                    preferences.setSavedPatternPoints(fullPattern.joinToString(","))
                                                                     preferences.setScreenLockType("PATTERN")
-                                                                    Toast.makeText(context, "Pattern saved successfully!", Toast.LENGTH_SHORT).show()
+                                                                    Toast.makeText(context, "Pattern saved (${fullPattern.size} dots with auto-middle-dots)!", Toast.LENGTH_SHORT).show()
                                                                     delay(1000)
                                                                     patternStep = 1
                                                                     firstDrawnPattern = emptyList()
@@ -842,63 +817,127 @@ fun SettingsScreen(
                                     )
                                     Spacer(modifier = Modifier.height(12.dp))
 
-                                    val isA11yRunning = AuraAccessibilityService.isRunning()
-                                    if (!isA11yRunning) {
-                                        Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .clip(RoundedCornerShape(10.dp))
-                                                .background(colors.warning.copy(alpha = 0.15f))
-                                                .border(1.dp, colors.warning.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
-                                                .padding(10.dp),
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Text(
-                                                text = "⚠️ Accessibility Service required for auto-unlock gestures.",
-                                                style = typography.labelSmall.copy(color = colors.warning),
-                                                modifier = Modifier.weight(1f)
-                                            )
-                                            AuraButton(
-                                                text = "Enable",
-                                                onClick = {
-                                                    context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
-                                                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                                                    })
-                                                },
-                                                isPrimary = false
-                                            )
-                                        }
-                                    } else {
+                                    Row(
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
                                         AuraButton(
-                                            text = "⚡ Test Auto-Lock & Auto-Unlock",
+                                            text = if (isTestingUnlock) "Testing..." else "⚡ Test Auto-Lock & Unlock",
                                             onClick = {
-                                                val a11y = AuraAccessibilityService.instance
-                                                if (a11y != null) {
-                                                    Toast.makeText(context, "Locking in 1s... Testing auto-unlock", Toast.LENGTH_SHORT).show()
-                                                    scope.launch {
-                                                        delay(1000)
-                                                        a11y.lockDevice()
-                                                        delay(1800)
-                                                        a11y.executeAutoUnlock(
-                                                            lockType = selectedLockPill,
-                                                            patternPoints = savedPatternPoints,
-                                                            pin = savedLockPin,
-                                                            password = savedLockPassword
-                                                        ) {
-                                                            // auto unlock completed
-                                                        }
+                                                if (isTestingUnlock) return@AuraButton
+                                                isTestingUnlock = true
+                                                unlockResultStatus = null
+                                                unlockStepLog = listOf("Locking device in 1.5s...")
+                                                scope.launch {
+                                                    delay(1500)
+                                                    val a11y = AuraAccessibilityService.instance
+                                                    if (a11y?.lockDevice() != true) {
+                                                        com.example.AuraApplication.instance.inputController.pressKey(223, "Lock Screen")
                                                     }
+                                                    delay(1200)
+                                                    val unlockManager = com.example.core.unlock.UnlockManager.getInstance(context)
+                                                    val result = unlockManager.executeUnlock(dryRunOnlyBouncer = false)
+                                                    unlockStepLog = result.stepLog
+                                                    unlockResultStatus = "${result.status}: ${result.humanMessage}"
+                                                    isTestingUnlock = false
                                                 }
                                             },
                                             isPrimary = true,
-                                            modifier = Modifier.fillMaxWidth()
+                                            modifier = Modifier.weight(1f)
                                         )
+
+                                        AuraButton(
+                                            text = "🔍 Dry Run (Bouncer Only)",
+                                            onClick = {
+                                                if (isTestingUnlock) return@AuraButton
+                                                isTestingUnlock = true
+                                                unlockResultStatus = null
+                                                unlockStepLog = listOf("Revealing bouncer without entering credentials...")
+                                                scope.launch {
+                                                    val unlockManager = com.example.core.unlock.UnlockManager.getInstance(context)
+                                                    val result = unlockManager.executeUnlock(dryRunOnlyBouncer = true)
+                                                    unlockStepLog = result.stepLog
+                                                    unlockResultStatus = "${result.status}: ${result.humanMessage}"
+                                                    isTestingUnlock = false
+                                                }
+                                            },
+                                            isPrimary = false,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                    }
+
+                                    if (unlockStepLog.isNotEmpty()) {
+                                        Spacer(modifier = Modifier.height(10.dp))
+                                        Card(
+                                            shape = RoundedCornerShape(10.dp),
+                                            colors = CardDefaults.cardColors(containerColor = colors.surfaceRaised),
+                                            modifier = Modifier.fillMaxWidth().border(1.dp, colors.border, RoundedCornerShape(10.dp))
+                                        ) {
+                                            Column(modifier = Modifier.padding(10.dp)) {
+                                                Text(
+                                                    text = "Unlock State Machine Step Log",
+                                                    style = typography.labelSmall.copy(color = colors.accentStart, fontWeight = FontWeight.Bold)
+                                                )
+                                                unlockResultStatus?.let { status ->
+                                                    Spacer(modifier = Modifier.height(4.dp))
+                                                    Text(text = status, style = typography.bodySmall.copy(color = colors.textPrimary, fontWeight = FontWeight.SemiBold))
+                                                }
+                                                Spacer(modifier = Modifier.height(6.dp))
+                                                unlockStepLog.forEach { step ->
+                                                    Text(text = "• $step", fontSize = 11.sp, color = colors.textSecondary, fontFamily = FontFamily.Monospace)
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
 
                         SettingsCategory.PERMISSIONS -> {
+                            item {
+                                Card(
+                                    shape = RoundedCornerShape(16.dp),
+                                    colors = CardDefaults.cardColors(containerColor = colors.surface),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .border(1.5.dp, colors.accentStart, RoundedCornerShape(16.dp))
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(14.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = "⚡ Grant All Permissions (Root)",
+                                                style = typography.titleSmall.copy(color = colors.accentStart, fontWeight = FontWeight.Bold)
+                                            )
+                                            Spacer(modifier = Modifier.height(2.dp))
+                                            Text(
+                                                text = "One-tap master root setup: grants overlay, battery whitelist, all runtime perms, accessibility, and background services.",
+                                                style = typography.bodySmall.copy(color = colors.textSecondary)
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.width(10.dp))
+                                        AuraButton(
+                                            text = if (isGrantingAll) "Granting..." else "Grant All",
+                                            onClick = {
+                                                if (isGrantingAll) return@AuraButton
+                                                scope.launch {
+                                                    isGrantingAll = true
+                                                    val ok = permissionDoctor.fixAll()
+                                                    isGrantingAll = false
+                                                    Toast.makeText(context, if (ok) "All permissions granted via Root!" else "Failed granting via Root", Toast.LENGTH_SHORT).show()
+                                                }
+                                            },
+                                            isPrimary = true
+                                        )
+                                    }
+                                }
+                            }
+
                             item {
                                 AuraCard(modifier = Modifier.fillMaxWidth()) {
                                     Text(
@@ -1116,6 +1155,100 @@ fun SettingsScreen(
                     }
                 }
             }
+        }
+
+        if (showPatternCalibrationDialog) {
+            val app = context.applicationContext as AuraApplication
+            val locator = remember {
+                com.example.core.unlock.PatternGridLocator(
+                    context,
+                    app.rootManager,
+                    app.inputController,
+                    com.example.core.settings.EncryptedKeyStorage(context)
+                )
+            }
+
+            AlertDialog(
+                onDismissRequest = { showPatternCalibrationDialog = false },
+                title = {
+                    Text(
+                        text = "📐 Calibrate Pattern Dots",
+                        style = typography.titleMedium.copy(color = colors.textPrimary)
+                    )
+                },
+                text = {
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Text(
+                            text = "Adjust the 3x3 pattern position so AI strokes hit your lock screen dots with 100% precision.",
+                            style = typography.bodySmall.copy(color = colors.textSecondary)
+                        )
+                        Spacer(modifier = Modifier.height(14.dp))
+
+                        Text(
+                            text = "Vertical Position (Y Offset): ${calibOffsetY.toInt()} px",
+                            style = typography.labelSmall.copy(color = colors.textPrimary)
+                        )
+                        Slider(
+                            value = calibOffsetY,
+                            onValueChange = { calibOffsetY = it },
+                            valueRange = -200f..200f,
+                            colors = SliderDefaults.colors(thumbColor = colors.accentStart, activeTrackColor = colors.accentStart)
+                        )
+
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Horizontal Position (X Offset): ${calibOffsetX.toInt()} px",
+                            style = typography.labelSmall.copy(color = colors.textPrimary)
+                        )
+                        Slider(
+                            value = calibOffsetX,
+                            onValueChange = { calibOffsetX = it },
+                            valueRange = -120f..120f,
+                            colors = SliderDefaults.colors(thumbColor = colors.accentStart, activeTrackColor = colors.accentStart)
+                        )
+
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Grid Scale: ${(calibScale * 100).toInt()}%",
+                            style = typography.labelSmall.copy(color = colors.textPrimary)
+                        )
+                        Slider(
+                            value = calibScale,
+                            onValueChange = { calibScale = it },
+                            valueRange = 0.75f..1.25f,
+                            colors = SliderDefaults.colors(thumbColor = colors.accentStart, activeTrackColor = colors.accentStart)
+                        )
+                    }
+                },
+                confirmButton = {
+                    AuraButton(
+                        text = "Save Calibration",
+                        onClick = {
+                            val calibratedPoints = locator.computeCustomGrid(calibOffsetX, calibOffsetY, calibScale)
+                            locator.saveCalibration(calibratedPoints)
+                            Toast.makeText(context, "✓ Pattern grid calibration saved!", Toast.LENGTH_SHORT).show()
+                            showPatternCalibrationDialog = false
+                        },
+                        isPrimary = true
+                    )
+                },
+                dismissButton = {
+                    AuraButton(
+                        text = "Reset Auto",
+                        onClick = {
+                            locator.resetCalibration()
+                            calibOffsetX = 0f
+                            calibOffsetY = 0f
+                            calibScale = 1.0f
+                            Toast.makeText(context, "Reset to automatic lockscreen detection", Toast.LENGTH_SHORT).show()
+                            showPatternCalibrationDialog = false
+                        },
+                        isPrimary = false
+                    )
+                },
+                containerColor = colors.surface,
+                shape = RoundedCornerShape(20.dp)
+            )
         }
     }
 }

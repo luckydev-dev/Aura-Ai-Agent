@@ -220,8 +220,8 @@ class CallAnnouncementManager(
         }
 
         if (!answered) {
-            val res = rootManager.execute("input keyevent 5")
-            answered = res.success
+            val res = com.example.AuraApplication.instance.inputController.pressKey(5, "Answer Call")
+            answered = res
         }
 
         releaseMicrophoneForCall()
@@ -270,8 +270,8 @@ class CallAnnouncementManager(
         }
 
         if (!rejected) {
-            val res = rootManager.execute("input keyevent 6")
-            rejected = res.success
+            val res = com.example.AuraApplication.instance.inputController.pressKey(6, "Reject Call")
+            rejected = res
         }
 
         isRinging = false
@@ -299,8 +299,8 @@ class CallAnnouncementManager(
             audioManager.ringerMode = AudioManager.RINGER_MODE_SILENT
             true
         } catch (e: Exception) {
-            val res = rootManager.execute("input keyevent 164")
-            res.success
+            val res = com.example.AuraApplication.instance.inputController.pressKey(164, "Mute Ringer")
+            res
         }
     }
 

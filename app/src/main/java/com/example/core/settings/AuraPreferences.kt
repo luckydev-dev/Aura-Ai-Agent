@@ -55,17 +55,21 @@ class AuraPreferences(
 
         // Overlays & Edge Lighting
         val KEY_EDGE_LIGHTING_ENABLED = booleanPreferencesKey("edge_lighting_enabled")
-        val KEY_EDGE_LIGHTING_STYLE = stringPreferencesKey("edge_lighting_style") // "NEON_RAINBOW", "SOFT_GRADIENT"
-        val KEY_EDGE_LIGHTING_COMET_COUNT = intPreferencesKey("edge_lighting_comet_count") // 1 or 2
-        val KEY_EDGE_LIGHTING_FLOW_SPEED = floatPreferencesKey("edge_lighting_flow_speed") // 0.5 to 2.5
         val KEY_EDGE_LIGHTING_THICKNESS = intPreferencesKey("edge_lighting_thickness")
-        val KEY_EDGE_LIGHTING_DEPTH_PERCENT = intPreferencesKey("edge_lighting_depth_percent") // 2 to 30, default 7
-        val KEY_EDGE_LIGHTING_THEME = stringPreferencesKey("edge_lighting_theme") // "Aura", "Ocean", "Sunset", "Mono"
         val KEY_EDGE_LIGHTING_SHOW_IN_APP = booleanPreferencesKey("edge_lighting_show_in_app") // default true
         val KEY_EDGE_LIGHTING_SHOW_WAKE = booleanPreferencesKey("edge_lighting_show_wake") // default false
         val KEY_EDGE_LIGHTING_INTENSITY = floatPreferencesKey("edge_lighting_intensity")
         val KEY_OVERLAY_ENABLED = booleanPreferencesKey("overlay_enabled")
         val KEY_FLOATING_CAPTIONS_ENABLED = booleanPreferencesKey("floating_captions_enabled")
+
+        // Agent Mouse Cursor
+        val KEY_AGENT_CURSOR_ENABLED = booleanPreferencesKey("agent_cursor_enabled")
+        val KEY_AGENT_CURSOR_STYLE = stringPreferencesKey("agent_cursor_style") // "ARROW", "DOT", "HAND"
+        val KEY_AGENT_CURSOR_SIZE_DP = floatPreferencesKey("agent_cursor_size_dp") // 18f to 40f
+        val KEY_AGENT_CURSOR_SPEED = stringPreferencesKey("agent_cursor_speed") // "INSTANT", "FAST", "NORMAL", "SLOW"
+        val KEY_AGENT_CURSOR_TRAIL = booleanPreferencesKey("agent_cursor_trail")
+        val KEY_AGENT_CURSOR_RIPPLE = booleanPreferencesKey("agent_cursor_ripple")
+        val KEY_AGENT_CURSOR_ACTION_LABEL = booleanPreferencesKey("agent_cursor_action_label")
 
         // Idle & Screen Timeout
         val KEY_IDLE_SILENCE_HANGUP_MINUTES = intPreferencesKey("idle_silence_hangup_minutes") // default 5 min
@@ -96,12 +100,6 @@ class AuraPreferences(
         val KEY_CALL_ANNOUNCEMENT_ENABLED = booleanPreferencesKey("call_announcement_enabled")
         val KEY_CALL_ANNOUNCE_WHATSAPP = booleanPreferencesKey("call_announce_whatsapp")
         val KEY_CALL_AUTO_ANSWER_VOICE = booleanPreferencesKey("call_auto_answer_voice")
-
-        // Screen Lock & Automation
-        val KEY_SCREEN_LOCK_TYPE = stringPreferencesKey("screen_lock_type") // "NONE", "PATTERN", "PIN", "PASSWORD"
-        val KEY_SAVED_PATTERN_POINTS = stringPreferencesKey("saved_pattern_points") // e.g. "0,1,2,4,6"
-        val KEY_SAVED_LOCK_PIN = stringPreferencesKey("saved_lock_pin")
-        val KEY_SAVED_LOCK_PASSWORD = stringPreferencesKey("saved_lock_password")
 
         // Safe Mode
         val KEY_SAFE_MODE_TRIGGERED = booleanPreferencesKey("safe_mode_triggered")
@@ -348,28 +346,8 @@ class AuraPreferences(
         it[KEY_EDGE_LIGHTING_ENABLED] ?: true
     }
 
-    val edgeLightingStyle: Flow<String> = context.dataStore.data.catch { emitDefaults(it) }.map {
-        it[KEY_EDGE_LIGHTING_STYLE] ?: "NEON_RAINBOW"
-    }
-
-    val edgeLightingCometCount: Flow<Int> = context.dataStore.data.catch { emitDefaults(it) }.map {
-        it[KEY_EDGE_LIGHTING_COMET_COUNT] ?: 1
-    }
-
-    val edgeLightingFlowSpeed: Flow<Float> = context.dataStore.data.catch { emitDefaults(it) }.map {
-        it[KEY_EDGE_LIGHTING_FLOW_SPEED] ?: 1.0f
-    }
-
     val edgeLightingThickness: Flow<Int> = context.dataStore.data.catch { emitDefaults(it) }.map {
         it[KEY_EDGE_LIGHTING_THICKNESS] ?: 8
-    }
-
-    val edgeLightingDepthPercent: Flow<Int> = context.dataStore.data.catch { emitDefaults(it) }.map {
-        it[KEY_EDGE_LIGHTING_DEPTH_PERCENT] ?: 7
-    }
-
-    val edgeLightingTheme: Flow<String> = context.dataStore.data.catch { emitDefaults(it) }.map {
-        it[KEY_EDGE_LIGHTING_THEME] ?: "Aura"
     }
 
     val edgeLightingShowInApp: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
@@ -382,6 +360,35 @@ class AuraPreferences(
 
     val edgeLightingIntensity: Flow<Float> = context.dataStore.data.catch { emitDefaults(it) }.map {
         it[KEY_EDGE_LIGHTING_INTENSITY] ?: 1.0f
+    }
+
+    // Agent Mouse Cursor
+    val agentCursorEnabled: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_AGENT_CURSOR_ENABLED] ?: true
+    }
+
+    val agentCursorStyle: Flow<String> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_AGENT_CURSOR_STYLE] ?: "ARROW"
+    }
+
+    val agentCursorSizeDp: Flow<Float> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_AGENT_CURSOR_SIZE_DP] ?: 26f
+    }
+
+    val agentCursorSpeed: Flow<String> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_AGENT_CURSOR_SPEED] ?: "NORMAL"
+    }
+
+    val agentCursorTrail: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_AGENT_CURSOR_TRAIL] ?: true
+    }
+
+    val agentCursorRipple: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_AGENT_CURSOR_RIPPLE] ?: true
+    }
+
+    val agentCursorActionLabel: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_AGENT_CURSOR_ACTION_LABEL] ?: true
     }
 
     val floatingCaptionsEnabled: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
@@ -436,21 +443,31 @@ class AuraPreferences(
         it[KEY_CALL_AUTO_ANSWER_VOICE] ?: true
     }
 
-    // Screen Lock
-    val screenLockType: Flow<String> = context.dataStore.data.catch { emitDefaults(it) }.map {
-        it[KEY_SCREEN_LOCK_TYPE] ?: "NONE"
+    // Secure Screen Lock Credentials & Options (Stored in EncryptedKeyStorage)
+    private val _credentialTrigger = kotlinx.coroutines.flow.MutableStateFlow(System.currentTimeMillis())
+
+    val screenLockType: Flow<String> = _credentialTrigger.map {
+        encryptedKeyStorage.getLockType()
     }
 
-    val savedPatternPoints: Flow<String> = context.dataStore.data.catch { emitDefaults(it) }.map {
-        it[KEY_SAVED_PATTERN_POINTS] ?: ""
+    val savedPatternPoints: Flow<String> = _credentialTrigger.map {
+        encryptedKeyStorage.getPatternPoints()
     }
 
-    val savedLockPin: Flow<String> = context.dataStore.data.catch { emitDefaults(it) }.map {
-        it[KEY_SAVED_LOCK_PIN] ?: ""
+    val savedLockPin: Flow<String> = _credentialTrigger.map {
+        encryptedKeyStorage.getLockPin()
     }
 
-    val savedLockPassword: Flow<String> = context.dataStore.data.catch { emitDefaults(it) }.map {
-        it[KEY_SAVED_LOCK_PASSWORD] ?: ""
+    val savedLockPassword: Flow<String> = _credentialTrigger.map {
+        encryptedKeyStorage.getLockPassword()
+    }
+
+    val confirmBeforeUnlock: Flow<Boolean> = _credentialTrigger.map {
+        encryptedKeyStorage.getConfirmBeforeUnlock()
+    }
+
+    val showCursorDuringUnlock: Flow<Boolean> = _credentialTrigger.map {
+        encryptedKeyStorage.getShowCursorDuringUnlock()
     }
 
     // Safe mode
@@ -561,16 +578,20 @@ class AuraPreferences(
     suspend fun setWakeWordSensitivity(sens: String) = context.dataStore.edit { it[KEY_WAKE_WORD_SENSITIVITY] = sens }
 
     suspend fun setEdgeLightingEnabled(enabled: Boolean) = context.dataStore.edit { it[KEY_EDGE_LIGHTING_ENABLED] = enabled }
-    suspend fun setEdgeLightingStyle(style: String) = context.dataStore.edit { it[KEY_EDGE_LIGHTING_STYLE] = style }
-    suspend fun setEdgeLightingCometCount(count: Int) = context.dataStore.edit { it[KEY_EDGE_LIGHTING_COMET_COUNT] = count }
-    suspend fun setEdgeLightingFlowSpeed(speed: Float) = context.dataStore.edit { it[KEY_EDGE_LIGHTING_FLOW_SPEED] = speed }
     suspend fun setEdgeLightingThickness(thickness: Int) = context.dataStore.edit { it[KEY_EDGE_LIGHTING_THICKNESS] = thickness }
-    suspend fun setEdgeLightingDepthPercent(depth: Int) = context.dataStore.edit { it[KEY_EDGE_LIGHTING_DEPTH_PERCENT] = depth.coerceIn(2, 30) }
-    suspend fun setEdgeLightingTheme(theme: String) = context.dataStore.edit { it[KEY_EDGE_LIGHTING_THEME] = theme }
     suspend fun setEdgeLightingShowInApp(show: Boolean) = context.dataStore.edit { it[KEY_EDGE_LIGHTING_SHOW_IN_APP] = show }
     suspend fun setEdgeLightingShowWake(show: Boolean) = context.dataStore.edit { it[KEY_EDGE_LIGHTING_SHOW_WAKE] = show }
     suspend fun setEdgeLightingIntensity(intensity: Float) = context.dataStore.edit { it[KEY_EDGE_LIGHTING_INTENSITY] = intensity }
     suspend fun setFloatingCaptionsEnabled(enabled: Boolean) = context.dataStore.edit { it[KEY_FLOATING_CAPTIONS_ENABLED] = enabled }
+
+    // Agent Mouse Cursor Setters
+    suspend fun setAgentCursorEnabled(enabled: Boolean) = context.dataStore.edit { it[KEY_AGENT_CURSOR_ENABLED] = enabled }
+    suspend fun setAgentCursorStyle(style: String) = context.dataStore.edit { it[KEY_AGENT_CURSOR_STYLE] = style }
+    suspend fun setAgentCursorSizeDp(size: Float) = context.dataStore.edit { it[KEY_AGENT_CURSOR_SIZE_DP] = size }
+    suspend fun setAgentCursorSpeed(speed: String) = context.dataStore.edit { it[KEY_AGENT_CURSOR_SPEED] = speed }
+    suspend fun setAgentCursorTrail(enabled: Boolean) = context.dataStore.edit { it[KEY_AGENT_CURSOR_TRAIL] = enabled }
+    suspend fun setAgentCursorRipple(enabled: Boolean) = context.dataStore.edit { it[KEY_AGENT_CURSOR_RIPPLE] = enabled }
+    suspend fun setAgentCursorActionLabel(enabled: Boolean) = context.dataStore.edit { it[KEY_AGENT_CURSOR_ACTION_LABEL] = enabled }
 
     suspend fun setAssistantName(name: String) = context.dataStore.edit { it[KEY_ASSISTANT_NAME] = name.trim() }
     suspend fun setSelectedPersona(persona: String) = context.dataStore.edit { it[KEY_SELECTED_PERSONA] = persona.lowercase().trim() }
@@ -627,10 +648,73 @@ class AuraPreferences(
     suspend fun setWhatsappBusiness(enabled: Boolean) = context.dataStore.edit { it[KEY_WHATSAPP_BUSINESS] = enabled }
     suspend fun setOnboardingCompleted(completed: Boolean) = context.dataStore.edit { it[KEY_ONBOARDING_COMPLETED] = completed }
 
-    suspend fun setScreenLockType(type: String) = context.dataStore.edit { it[KEY_SCREEN_LOCK_TYPE] = type }
-    suspend fun setSavedPatternPoints(points: String) = context.dataStore.edit { it[KEY_SAVED_PATTERN_POINTS] = points }
-    suspend fun setSavedLockPin(pin: String) = context.dataStore.edit { it[KEY_SAVED_LOCK_PIN] = pin }
-    suspend fun setSavedLockPassword(password: String) = context.dataStore.edit { it[KEY_SAVED_LOCK_PASSWORD] = password }
+    // Secure Screen Lock Credentials
+    suspend fun setScreenLockType(type: String) {
+        encryptedKeyStorage.setLockType(type)
+        _credentialTrigger.value = System.currentTimeMillis()
+    }
+    suspend fun setSavedPatternPoints(points: String) {
+        encryptedKeyStorage.setPatternPoints(points)
+        _credentialTrigger.value = System.currentTimeMillis()
+    }
+    suspend fun setSavedLockPin(pin: String) {
+        encryptedKeyStorage.setLockPin(pin)
+        _credentialTrigger.value = System.currentTimeMillis()
+    }
+    suspend fun setSavedLockPassword(password: String) {
+        encryptedKeyStorage.setLockPassword(password)
+        _credentialTrigger.value = System.currentTimeMillis()
+    }
+    suspend fun setConfirmBeforeUnlock(confirm: Boolean) {
+        encryptedKeyStorage.setConfirmBeforeUnlock(confirm)
+        _credentialTrigger.value = System.currentTimeMillis()
+    }
+    suspend fun setShowCursorDuringUnlock(show: Boolean) {
+        encryptedKeyStorage.setShowCursorDuringUnlock(show)
+        _credentialTrigger.value = System.currentTimeMillis()
+    }
+    suspend fun setPatternCalibrationJson(json: String) {
+        encryptedKeyStorage.setPatternCalibrationJson(json)
+        _credentialTrigger.value = System.currentTimeMillis()
+    }
+
+    suspend fun migrateLegacyCredentialsAndEdgeLighting() {
+        try {
+            context.dataStore.edit { prefs ->
+                val legacyType = prefs[stringPreferencesKey("screen_lock_type")]
+                val legacyPin = prefs[stringPreferencesKey("saved_lock_pin")]
+                val legacyPattern = prefs[stringPreferencesKey("saved_pattern_points")]
+                val legacyPassword = prefs[stringPreferencesKey("saved_lock_password")]
+
+                if (!legacyType.isNullOrBlank() && encryptedKeyStorage.getLockType().isBlank()) {
+                    encryptedKeyStorage.setLockType(legacyType)
+                }
+                if (!legacyPin.isNullOrBlank() && encryptedKeyStorage.getLockPin().isBlank()) {
+                    encryptedKeyStorage.setLockPin(legacyPin)
+                }
+                if (!legacyPattern.isNullOrBlank() && encryptedKeyStorage.getPatternPoints().isBlank()) {
+                    encryptedKeyStorage.setPatternPoints(legacyPattern)
+                }
+                if (!legacyPassword.isNullOrBlank() && encryptedKeyStorage.getLockPassword().isBlank()) {
+                    encryptedKeyStorage.setLockPassword(legacyPassword)
+                }
+
+                // Remove legacy keys from DataStore
+                prefs.remove(stringPreferencesKey("screen_lock_type"))
+                prefs.remove(stringPreferencesKey("saved_lock_pin"))
+                prefs.remove(stringPreferencesKey("saved_pattern_points"))
+                prefs.remove(stringPreferencesKey("saved_lock_password"))
+                prefs.remove(stringPreferencesKey("edge_lighting_style"))
+                prefs.remove(stringPreferencesKey("edge_lighting_theme"))
+                prefs.remove(intPreferencesKey("edge_lighting_comet_count"))
+                prefs.remove(floatPreferencesKey("edge_lighting_flow_speed"))
+                prefs.remove(intPreferencesKey("edge_lighting_depth_percent"))
+            }
+            _credentialTrigger.value = System.currentTimeMillis()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed migration: ${e.message}", e)
+        }
+    }
 
     suspend fun setToolEnabled(toolName: String, enabled: Boolean) {
         context.dataStore.edit { prefs ->
