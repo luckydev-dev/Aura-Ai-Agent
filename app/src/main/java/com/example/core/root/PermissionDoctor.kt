@@ -191,6 +191,22 @@ class PermissionDoctor(
             )
         )
 
+        // 9. Touch Pass-Through Test (Android 12+ Overlay Alpha Check)
+        val attachedOverlays = com.example.ui.overlay.OverlayWindowDefaults.getAttachedWindows()
+        val allPassThroughValid = attachedOverlays.none { it.value > com.example.ui.overlay.OverlayWindowDefaults.MAX_PASSTHROUGH_ALPHA }
+        items.add(
+            PermissionCheckItem(
+                id = "TOUCH_PASSTHROUGH",
+                title = "Touch Pass-Through Integrity",
+                description = "Guarantees all overlay windows use opacity <= 0.79 to prevent Android 12+ untrusted touch blocking.",
+                isGranted = allPassThroughValid,
+                isCritical = true,
+                fixAction = {
+                    com.example.ui.overlay.OverlayWindowDefaults.getAttachedWindows().none { it.value > com.example.ui.overlay.OverlayWindowDefaults.MAX_PASSTHROUGH_ALPHA }
+                }
+            )
+        )
+
         items
     }
 

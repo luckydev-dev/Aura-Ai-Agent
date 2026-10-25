@@ -63,6 +63,7 @@ class ToolRegistry(
         val routineTools = RoutineTools(memoryRepository) { name, args ->
             executeTool(name, args)
         }
+        val memoryTools = MemoryTools(memoryRepository, preferences)
         val voiceControlTools = VoiceAgentControlTools(
             preferences = preferences,
             permissionDoctor = permissionDoctor,
@@ -78,6 +79,7 @@ class ToolRegistry(
                 routineTools.getAllTools() +
                 mediaTools.getAllTools() +
                 powerTools.getAllTools() +
+                memoryTools.getAllTools() +
                 voiceControlTools.getAllTools()
 
         all.forEach { tool ->

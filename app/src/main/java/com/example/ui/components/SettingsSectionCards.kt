@@ -50,12 +50,28 @@ fun OwnerVoiceEnrollmentCard(
     val colors = AuraTheme.colors
     val typography = AuraTheme.typography
 
+    val preferences = remember { AuraPreferences(context) }
     val verifier = remember { OwnerVoiceVerifier(context) }
+
+    val ownerVoiceLockEnabled by preferences.ownerVoiceLockEnabled.collectAsState(initial = false)
+
     var hasProfile by remember { mutableStateOf(verifier.hasProfile()) }
-    var isRecording by remember { mutableStateOf(false) }
-    var recordProgress by remember { mutableStateOf(0f) }
-    var statusText by remember { mutableStateOf<String?>(null) }
     var profileInfo by remember { mutableStateOf(verifier.getProfile()) }
+    var statusText by remember { mutableStateOf<String?>(null) }
+
+    // 3-Phrase Guided Enrollment Dialog state
+    var showGuidedDialog by remember { mutableStateOf(false) }
+    var currentStep by remember { mutableStateOf(1) } // 1, 2, 3
+    var isRecordingStep by remember { mutableStateOf(false) }
+    var stepProgress by remember { mutableStateOf(0f) }
+    var collectedSamples by remember { mutableStateOf<MutableList<ShortArray>>(mutableListOf()) }
+    var dialogError by remember { mutableStateOf<String?>(null) }
+
+    // Live Voice Verification Test state
+    var isTestingVoice by remember { mutableStateOf(false) }
+    var testProgress by remember { mutableStateOf(0f) }
+    var testScorePercent by remember { mutableStateOf<Int?>(null) }
+    var testMatchMessage by remember { mutableStateOf<String?>(null) }
 
     Card(
         shape = RoundedCornerShape(20.dp),
@@ -78,15 +94,24 @@ fun OwnerVoiceEnrollmentCard(
                 )
                 Spacer(modifier = Modifier.width(10.dp))
                 Text(
-                    text = "Owner Voice Recognition",
+                    text = "Owner Voice Security Lock",
                     style = typography.titleMedium.copy(color = colors.textPrimary)
                 )
             }
 
             Spacer(modifier = Modifier.height(6.dp))
             Text(
-                text = "Record a 3-second voice sample so Maya only responds when you speak, ignoring unrecognized background voices.",
+                text = "Locks Maya's microphone strictly to your voice profile. Speech from other people or background chatter is silently muted.",
                 style = typography.bodySmall.copy(color = colors.textSecondary)
+            )
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            AuraToggleRow(
+                title = "Lock Maya to My Voice Only",
+                subtitle = "Silently ignores unrecognized voices in real time.",
+                checked = ownerVoiceLockEnabled,
+                onCheckedChange = { scope.launch { preferences.setOwnerVoiceLockEnabled(it) } }
             )
 
             Spacer(modifier = Modifier.height(14.dp))
@@ -101,81 +126,164 @@ fun OwnerVoiceEnrollmentCard(
                 ) {
                     Column {
                         Text(
-                            text = "✓ Owner Voice Enrolled",
+                            text = "✓ Owner Voice Enrolled (3 Phrases)",
                             fontSize = 13.sp,
                             fontWeight = FontWeight.Bold,
                             color = Color(0xFF4CAF50)
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = "Pitch F0: ${profileInfo?.f0Mean?.toInt()} Hz | Centroid: ${profileInfo?.spectralCentroid?.toInt()} Hz",
+                            text = "Mean Pitch F0: ${profileInfo?.f0Mean?.toInt()} Hz | Centroid: ${profileInfo?.spectralCentroid?.toInt()} Hz",
                             fontSize = 11.sp,
                             color = colors.textSecondary
                         )
                     }
                 }
                 Spacer(modifier = Modifier.height(12.dp))
-            }
-
-            if (isRecording) {
-                Column(modifier = Modifier.fillMaxWidth()) {
+            } else {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color(0xFF262118))
+                        .padding(12.dp)
+                ) {
                     Text(
-                        text = "Recording 3s sample... Speak 'Hey Maya, this is Lucky'",
-                        style = typography.labelMedium.copy(color = Color(0xFFFFB347))
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    LinearProgressIndicator(
-                        progress = { recordProgress },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(8.dp)
-                            .clip(RoundedCornerShape(4.dp)),
-                        color = Color(0xFF7085FF)
+                        text = "⚠️ No voice profile enrolled yet. Enroll your voice below to activate voice security.",
+                        fontSize = 12.sp,
+                        color = Color(0xFFFFB347)
                     )
                 }
-            } else {
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    modifier = Modifier.fillMaxWidth()
+                Spacer(modifier = Modifier.height(12.dp))
+            }
+
+            // Action Buttons Row
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Button(
+                    onClick = {
+                        currentStep = 1
+                        collectedSamples = mutableListOf()
+                        dialogError = null
+                        showGuidedDialog = true
+                    },
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7085FF)),
+                    modifier = Modifier.weight(1f)
                 ) {
-                    Button(
+                    Text(if (hasProfile) "Re-enroll (3 Phrases)" else "🎙️ Enroll Voice (3 Phrases)")
+                }
+
+                if (hasProfile) {
+                    OutlinedButton(
                         onClick = {
-                            scope.launch {
-                                isRecording = true
-                                recordProgress = 0f
-                                statusText = null
-                                val result = verifier.enrollOwnerVoice { prog ->
-                                    recordProgress = prog
-                                }
-                                isRecording = false
-                                result.onSuccess { prof ->
-                                    hasProfile = true
-                                    profileInfo = prof
-                                    statusText = "Voice sample saved! Maya will now only respond to you."
-                                }.onFailure { err ->
-                                    statusText = "Enrollment failed: ${err.message}"
-                                }
-                            }
+                            verifier.deleteProfile()
+                            hasProfile = false
+                            profileInfo = null
+                            testScorePercent = null
+                            testMatchMessage = null
+                            statusText = "Voice profile reset."
                         },
                         shape = RoundedCornerShape(12.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7085FF)),
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.weight(0.4f)
                     ) {
-                        Text(if (hasProfile) "Re-record Sample" else "Record Voice Sample (3s)")
+                        Text("Reset", color = colors.danger)
                     }
+                }
+            }
 
-                    if (hasProfile) {
-                        OutlinedButton(
-                            onClick = {
-                                verifier.deleteProfile()
-                                hasProfile = false
-                                profileInfo = null
-                                statusText = "Owner voice profile deleted."
-                            },
-                            shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier.weight(0.5f)
-                        ) {
-                            Text("Reset", color = colors.danger)
+            // Live Test Card Section
+            if (hasProfile) {
+                Spacer(modifier = Modifier.height(14.dp))
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF141722)),
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(1.dp, Color(0xFF262C40), RoundedCornerShape(14.dp))
+                        .padding(12.dp)
+                ) {
+                    Column {
+                        Text(
+                            text = "Real-time Voice Verification Test",
+                            style = typography.labelMedium.copy(color = colors.textPrimary)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "Speak a short sentence into the mic to test live voice match score.",
+                            style = typography.bodySmall.copy(color = colors.textSecondary)
+                        )
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        if (isTestingVoice) {
+                            Column {
+                                Text("Listening & analyzing voice features...", fontSize = 12.sp, color = Color(0xFFFFB347))
+                                Spacer(modifier = Modifier.height(6.dp))
+                                LinearProgressIndicator(
+                                    progress = { testProgress },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(6.dp)
+                                        .clip(RoundedCornerShape(3.dp)),
+                                    color = Color(0xFF7085FF)
+                                )
+                            }
+                        } else {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                AuraButton(
+                                    text = "🔊 Test Live Match Score",
+                                    onClick = {
+                                        scope.launch {
+                                            isTestingVoice = true
+                                            testProgress = 0f
+                                            testScorePercent = null
+                                            testMatchMessage = null
+                                            val res = verifier.recordSinglePhrase(3) { prog -> testProgress = prog }
+                                            isTestingVoice = false
+                                            res.onSuccess { data ->
+                                                val match = verifier.verifyOwnerVoice(data, data.size)
+                                                testScorePercent = match.scorePercent
+                                                testMatchMessage = match.message
+                                            }.onFailure { err ->
+                                                testMatchMessage = "Test failed: ${err.message}"
+                                            }
+                                        }
+                                    },
+                                    testTag = "test_live_voice_btn"
+                                )
+
+                                testScorePercent?.let { score ->
+                                    val isPass = score >= 50
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(if (isPass) Color(0xFF1E3A2B) else Color(0xFF3D1E1E))
+                                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                                    ) {
+                                        Text(
+                                            text = "$score% Match ${if (isPass) "✓" else "✗"}",
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (isPass) Color(0xFF4CAF50) else Color(0xFFEF5350)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        testMatchMessage?.let { msg ->
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = msg,
+                                fontSize = 11.sp,
+                                color = colors.textSecondary
+                            )
                         }
                     }
                 }
@@ -185,10 +293,162 @@ fun OwnerVoiceEnrollmentCard(
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     text = msg,
-                    style = typography.labelSmall.copy(color = if (msg.contains("failed")) colors.danger else colors.success)
+                    style = typography.labelSmall.copy(color = if (msg.contains("reset") || msg.contains("failed")) colors.danger else colors.success)
                 )
             }
         }
+    }
+
+    // 3-PHRASE GUIDED ENROLLMENT DIALOG
+    if (showGuidedDialog) {
+        val phrases = listOf(
+            "Phrase 1 of 3: \"Hey Maya, main tumhara boss hu.\"",
+            "Phrase 2 of 3: \"Aaj ka mausam kaisa hai phone check karo.\"",
+            "Phrase 3 of 3: \"Aura voice security active karo.\""
+        )
+
+        AlertDialog(
+            onDismissRequest = {
+                if (!isRecordingStep) {
+                    showGuidedDialog = false
+                }
+            },
+            title = {
+                Text(
+                    text = "🎙️ 3-Phrase Voice Enrollment",
+                    style = typography.titleMedium.copy(color = colors.textPrimary)
+                )
+            },
+            text = {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = "Read each phrase clearly in your normal speaking voice so Maya learns your unique vocal acoustics.",
+                        style = typography.bodySmall.copy(color = colors.textSecondary)
+                    )
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    // Step Indicator
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        (1..3).forEach { stepNum ->
+                            val isDone = stepNum < currentStep
+                            val isCurrent = stepNum == currentStep
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(6.dp)
+                                    .clip(RoundedCornerShape(3.dp))
+                                    .background(
+                                        when {
+                                            isDone -> Color(0xFF4CAF50)
+                                            isCurrent -> Color(0xFF7085FF)
+                                            else -> Color(0xFF2B3145)
+                                        }
+                                    )
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(18.dp))
+
+                    // Phrase Prompt Card
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF191F33)),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .border(1.dp, Color(0xFF333D5C), RoundedCornerShape(12.dp))
+                            .padding(14.dp)
+                    ) {
+                        Column {
+                            Text(
+                                text = "Speak phrase $currentStep:",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF7085FF)
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = phrases.getOrElse(currentStep - 1) { "" },
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = colors.textPrimary
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    if (isRecordingStep) {
+                        Column {
+                            Text("Recording phrase $currentStep (3 seconds)...", fontSize = 12.sp, color = Color(0xFFFFB347))
+                            Spacer(modifier = Modifier.height(8.dp))
+                            LinearProgressIndicator(
+                                progress = { stepProgress },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(8.dp)
+                                    .clip(RoundedCornerShape(4.dp)),
+                                color = Color(0xFF7085FF)
+                            )
+                        }
+                    }
+
+                    dialogError?.let { err ->
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(text = err, fontSize = 12.sp, color = colors.danger)
+                    }
+                }
+            },
+            confirmButton = {
+                AuraButton(
+                    text = if (isRecordingStep) "Recording..." else "🎙️ Record Phrase $currentStep",
+                    onClick = {
+                        if (!isRecordingStep) {
+                            scope.launch {
+                                isRecordingStep = true
+                                stepProgress = 0f
+                                dialogError = null
+                                val recordRes = verifier.recordSinglePhrase(3) { prog -> stepProgress = prog }
+                                isRecordingStep = false
+
+                                recordRes.onSuccess { audioData ->
+                                    collectedSamples.add(audioData)
+                                    if (currentStep < 3) {
+                                        currentStep++
+                                    } else {
+                                        // Finalize 3 phrases
+                                        val combineRes = verifier.combineAndSaveThreePhrases(collectedSamples)
+                                        combineRes.onSuccess { prof ->
+                                            hasProfile = true
+                                            profileInfo = prof
+                                            showGuidedDialog = false
+                                            statusText = "3-Phrase voice profile saved! Maya voice lock active."
+                                        }.onFailure { combineErr ->
+                                            dialogError = "Saving failed: ${combineErr.message}"
+                                        }
+                                    }
+                                }.onFailure { recordErr ->
+                                    dialogError = recordErr.message ?: "Phrase recording failed."
+                                }
+                            }
+                        }
+                    },
+                    enabled = !isRecordingStep,
+                    testTag = "record_guided_phrase_btn"
+                )
+            },
+            dismissButton = {
+                if (!isRecordingStep) {
+                    TextButton(onClick = { showGuidedDialog = false }) {
+                        Text("Cancel", color = colors.textSecondary)
+                    }
+                }
+            }
+        )
     }
 }
 
@@ -498,9 +758,7 @@ fun AgentCursorSettingsCard(
         previewSpeed: CursorSpeed? = null,
         previewSize: Float? = null
     ) {
-        val controller = com.example.service.AuraForegroundService.currentService?.overlayController
-        val cursorOverlay = controller?.agentCursorOverlay
-            ?: com.example.ui.overlay.AgentCursorOverlay(context, com.example.AuraApplication.instance.inputController)
+        val cursorOverlay = com.example.AuraApplication.instance.overlayController.agentCursorOverlay
         cursorOverlay.previewAnimation(previewStyle, previewSpeed, previewSize)
     }
 
@@ -692,16 +950,8 @@ fun AgentCursorSettingsCard(
                 AuraButton(
                     text = "🎯 Test Agent Cursor Demo",
                     onClick = {
-                        val controller = com.example.service.AuraForegroundService.currentService?.overlayController
-                        if (controller != null) {
-                            controller.agentCursorOverlay.testDemo()
-                        } else {
-                            val cursorOverlay = com.example.ui.overlay.AgentCursorOverlay(
-                                context,
-                                com.example.AuraApplication.instance.inputController
-                            )
-                            cursorOverlay.testDemo()
-                        }
+                        val cursorOverlay = com.example.AuraApplication.instance.overlayController.agentCursorOverlay
+                        cursorOverlay.testDemo()
                     },
                     isPrimary = true,
                     modifier = Modifier.fillMaxWidth()

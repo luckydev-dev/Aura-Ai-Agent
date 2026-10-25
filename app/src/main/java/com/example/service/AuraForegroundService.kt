@@ -235,13 +235,7 @@ class AuraForegroundService : Service() {
                 Log.e(TAG, "Failed registering screen receiver", e)
             }
 
-            overlayController = OverlayController(
-                context = this,
-                preferences = preferences,
-                overlayManager = AuraApplication.instance.overlayManager,
-                edgeLightingOverlay = EdgeLightingOverlay(this)
-            )
-            overlayController.startObserving()
+            overlayController = AuraApplication.instance.overlayController
 
             val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
             wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Aura:CallWakeLock").apply {
@@ -294,6 +288,15 @@ class AuraForegroundService : Service() {
             }
         }
 
+        val voiceVerifier = com.example.core.audio.OwnerVoiceVerifier(this)
+        audioStreamer.ownerVoiceVerifier = voiceVerifier
+
+        serviceScope.launch {
+            preferences.ownerVoiceLockEnabled.collectLatest { lockEnabled ->
+                audioStreamer.ownerVoiceLockEnabled = lockEnabled
+            }
+        }
+
         serviceScope.launch {
             preferences.noiseGateStrength.collectLatest { strength ->
                 audioStreamer.noiseGateStrength = strength
@@ -312,18 +315,39 @@ class AuraForegroundService : Service() {
             }
         }
 
-        serviceScope.launch {
-            liveClient.connectionState.collectLatest { state ->
+        fun syncOverlayStates() {
+            if (!::overlayController.isInitialized) return
+            serviceScope.launch {
                 overlayController.updateCallState(
                     isCallActive = _isCallActive.value,
-                    connectionState = state,
-                    isAuraActing = liveClient.isAuraActing.value,
-                    isAuraThinking = liveClient.isAuraThinking.value,
-                    isMuted = audioStreamer.isMuted.value,
-                    speakerAmp = audioPlayer.speakerAmplitude.value
+                    connectionState = if (::liveClient.isInitialized) liveClient.connectionState.value else LiveConnectionState.Disconnected,
+                    isAuraActing = if (::liveClient.isInitialized) liveClient.isAuraActing.value else false,
+                    isAuraThinking = if (::liveClient.isInitialized) liveClient.isAuraThinking.value else false,
+                    isMuted = if (::audioStreamer.isInitialized) audioStreamer.isMuted.value else false,
+                    speakerAmp = if (::audioPlayer.isInitialized) audioPlayer.speakerAmplitude.value else 0f
                 )
                 updateNotification()
             }
+        }
+
+        serviceScope.launch {
+            _isCallActive.collectLatest { syncOverlayStates() }
+        }
+
+        serviceScope.launch {
+            liveClient.connectionState.collectLatest { syncOverlayStates() }
+        }
+
+        serviceScope.launch {
+            liveClient.isAuraActing.collectLatest { syncOverlayStates() }
+        }
+
+        serviceScope.launch {
+            liveClient.isAuraThinking.collectLatest { syncOverlayStates() }
+        }
+
+        serviceScope.launch {
+            audioStreamer.isMuted.collectLatest { syncOverlayStates() }
         }
     }
 
@@ -756,7 +780,7 @@ class AuraForegroundService : Service() {
             callAnnouncementManager.destroy()
         }
         appInventory.destroy()
-        overlayController.destroy()
+        overlayController.hideAll()
 
         if (isNetworkCallbackRegistered) {
             try {

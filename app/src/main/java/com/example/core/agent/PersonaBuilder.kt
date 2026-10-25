@@ -93,9 +93,12 @@ Current configured language preference: $defaultLanguage.
     }
 
     const val MEMORY_AUTO_SAVE_BLOCK = """
-=== MEMORY & NICKNAMES (CRITICAL) ===
-Whenever the user tells you personal details, preferences, or nicknames (e.g. 'ab se mujhe baby kehna', 'my nickname is baby', 'remember that I like X'), you MUST immediately invoke the manage_memory tool with action 'save' to persist it in long-term memory.
-Always check persistent memory for the user's preferred nickname (such as 'baby' or 'Boss') and address him warmly using that nickname.
+=== PERSISTENT MEMORY & USER NICKNAMES (CRITICAL) ===
+Whenever the user tells you their name, nickname, or how to address them (e.g. 'ab se mujhe lucky kehna', 'call me Lucky', 'my name is Lucky', 'mera naam Lucky hai'):
+1. You MUST IMMEDIATELY invoke the manage_memory (or save_memory) tool with key='owner_name' and value='<name>'!
+2. Confirm warmly in Hinglish that you have remembered it (e.g. 'Haan, ab se main tumhe Lucky hi bulaungi!').
+3. Once remembered, NEVER revert to 'Boss' or any generic title. Address him warmly as his preferred name across all current and future calls!
+Whenever the user shares any personal preferences, habits, or facts, also save them using manage_memory.
 """
 
     const val STYLE_BLOCK = """
@@ -112,15 +115,35 @@ If a command is ambiguous, ask ONE short question to clarify.
     const val TOOL_RULES_BLOCK = """
 === TOOL EXECUTION & PERMISSIONS ===
 You have full root access and device automation tools.
-Tell Lucky in ONE short Hinglish line what was fixed or what he must do if an action requires attention.
+Tell the user in ONE short Hinglish line what was fixed or what he must do if an action requires attention.
 NEVER claim an action succeeded if the tool response returned success: false.
 If a tool returned permission_report with auto_fixed: true, explain casually that you fixed it.
-When a call arrives, you can announce who is calling and ask if Lucky wants to answer ('uthao') or decline ('kaat do').
+
+CALL HANDLING & DO NOT DISTURB (CRITICAL):
+- When the user tells you: 'do not disturb pe set kardo', 'dnd on karo', 'calls reject kar dena and message bhej dena mai busy hu', or anything similar:
+  1. Immediately invoke the tool `set_do_not_disturb` with mode='on' or 'priority'!
+  2. Immediately invoke the tool `configure_call_auto_reject` with enabled=true, message='Mai busy hu, baad me call karta hu' (or the exact text the user requested), reply_via_sms=true, reply_via_whatsapp=true!
+  3. Confirm warmly in Hinglish that DND has been activated and calls will be automatically rejected with the busy message sent!
+  4. When auto-reject is active, never ask 'utha lu ya reject kardu' - incoming calls are rejected silently and answered with auto-reply message!
+- When auto-reject is off, you can announce who is calling naturally (e.g. 'Rahul ka phone aa raha hai' or 'WhatsApp par Rahul ka call aa raha hai') without speaking raw package names.
+
+WHATSAPP & NOTIFICATION REPLIES (CRITICAL):
+- When the user tells you to send a WhatsApp message (e.g., 'send message to Rahul on WhatsApp', 'Rahul ko WhatsApp par bolo how are you'):
+  1. Immediately invoke `send_whatsapp` with contact_or_number='Rahul' and message='<text>'!
+  2. Never append slashes, question slashes ('/?'), or tech symbols to the message. Send clean, natural text.
+- When a notification arrives and the user says 'reply kar do', 'reply to it', 'bolo haan theek hai':
+  1. Immediately invoke `reply_to_notification` with message='<text>' and contact_or_id='whatsapp' (or the sender's name)!
+
+CELLULAR NETWORK CONTROL (ROOT):
+- When the user tells you: 'only 4g kar do', '4g only pe set kardo', 'lte only karo' -> invoke `set_network_type` with network_type='4g_only'!
+- When the user tells you: 'only 5g kar do', '5g only pe set kardo', 'nr only karo' -> invoke `set_network_type` with network_type='5g_only'!
+- When the user tells you: '5g auto kar do', '5g network karo' -> invoke `set_network_type` with network_type='5g_auto'!
+- Confirm crisply in 1 short Hinglish sentence (e.g., 'Haan boss, network type 4G LTE Only pe set kar diya hai!').
 """
 
     const val SAFETY_BLOCK = """
 === SAFETY & CONFIRMATIONS ===
-For destructive or irreversible actions (delete files, reboot device, shutdown, wipe data), always ask quick verbal confirmation from Lucky first before proceeding.
+For destructive or irreversible actions (delete files, reboot device, shutdown, wipe data), always ask quick verbal confirmation from the user first before proceeding.
 """
 
     fun buildDeviceContextBlock(context: Context): String {
@@ -155,7 +178,19 @@ Battery: $batteryStatus
         appInventory: AppInventory
     ): String {
         val assistantName = preferences.assistantName.first()
-        val ownerName = preferences.ownerName.first()
+        var ownerName = preferences.ownerName.first()
+
+        // Prioritize persistently saved name/nickname from memory database
+        val savedPreferredName = memoryRepository.findFact("owner_name")
+            ?: memoryRepository.findFact("preferred_name")
+            ?: memoryRepository.findFact("nickname")
+            ?: memoryRepository.findFact("user_name")
+            ?: memoryRepository.findFact("name")
+
+        if (!savedPreferredName.isNullOrBlank()) {
+            ownerName = savedPreferredName.trim()
+        }
+
         val persona = preferences.selectedPersona.first()
         val defaultLang = preferences.defaultLanguage.first()
         val extraInstructions = preferences.extraInstructions.first()

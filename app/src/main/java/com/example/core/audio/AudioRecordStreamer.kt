@@ -66,6 +66,8 @@ class AudioRecordStreamer(
     var noiseGateStrength: String = "Medium" // Off, Low, Medium, High
     var isAuraSpeaking: Boolean = false
     var isHeadphonesMode: Boolean = false
+    var ownerVoiceLockEnabled: Boolean = false
+    var ownerVoiceVerifier: OwnerVoiceVerifier? = null
 
     // 1st-order High-Pass Filter state (~120Hz cutoff at 16kHz: alpha ≈ 0.955f)
     private val hpAlpha = 0.955f
@@ -277,6 +279,24 @@ class AudioRecordStreamer(
 
                         // 5. Send Audio or Digital Silence
                         if (gateOpen) {
+                            val verifier = ownerVoiceVerifier
+                            if (ownerVoiceLockEnabled && verifier != null && verifier.hasProfile()) {
+                                val shorts = ShortArray(read / 2)
+                                var si = 0
+                                var bi = 0
+                                while (bi + 1 < read && si < shorts.size) {
+                                    shorts[si] = ((filteredBuffer[bi].toInt() and 0xFF) or (filteredBuffer[bi + 1].toInt() shl 8)).toShort()
+                                    si++
+                                    bi += 2
+                                }
+                                val matchResult = verifier.verifyOwnerVoice(shorts, si)
+                                if (!matchResult.isMatch) {
+                                    // Unrecognized voice: silently mute & drop audio frame
+                                    _gatedFramesCount.value += 1
+                                    onChunkEncoded(silenceChunkBase64)
+                                    continue
+                                }
+                            }
                             val base64Chunk = Base64.encodeToString(filteredBuffer, 0, read, Base64.NO_WRAP)
                             onChunkEncoded(base64Chunk)
                         } else {

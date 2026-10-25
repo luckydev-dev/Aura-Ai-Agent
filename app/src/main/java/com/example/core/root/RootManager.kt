@@ -192,6 +192,9 @@ class RootManager(private val context: Context) {
         val batteryRes = execute("dumpsys deviceidle whitelist +$pkg")
         results["BATTERY_OPTIMIZATION"] = batteryRes.success
 
+        // Disable Android 12+ untrusted touch blocking
+        execute("settings put global block_untrusted_touches 0")
+
         // Enable Accessibility Service with real ComponentName
         val accessComponent = ComponentName(context, AuraAccessibilityService::class.java).flattenToString()
         val existingServices = execute("settings get secure enabled_accessibility_services").stdout.trim()

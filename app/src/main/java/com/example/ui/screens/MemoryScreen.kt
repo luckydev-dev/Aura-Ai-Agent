@@ -152,6 +152,10 @@ fun MemoryScreen(
                 if (newKey.isNotBlank() && newValue.isNotBlank()) {
                     scope.launch {
                         repository.saveFact(newKey, newValue, newCategory)
+                        val lower = newKey.lowercase()
+                        if (lower in listOf("owner_name", "preferred_name", "nickname", "name", "call_me", "user_name") || lower.contains("name")) {
+                            com.example.core.settings.AuraPreferences(context).setOwnerName(newValue.trim())
+                        }
                         newKey = ""
                         newValue = ""
                         showAddDialog = false

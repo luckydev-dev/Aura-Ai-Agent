@@ -84,7 +84,9 @@ class AgentPlanner(
         val tempFile = File(context.cacheDir, "planner_screen.png")
         try {
             val cmd = "screencap -p ${tempFile.absolutePath}"
-            val res = rootManager.execute(cmd)
+            val res = com.example.AuraApplication.instance.overlayController.hideForCapture {
+                rootManager.execute(cmd)
+            }
             if (!res.success || !tempFile.exists()) return@withContext null
 
             val originalBitmap = BitmapFactory.decodeFile(tempFile.absolutePath) ?: return@withContext null

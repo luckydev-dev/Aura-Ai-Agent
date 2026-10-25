@@ -42,15 +42,17 @@ class ScreenAutomationTools(
     }
 
     suspend fun getScreenNodes(): List<ScreenNode> {
-        val a11y = AuraAccessibilityService.instance
-        if (a11y != null) {
-            val a11yNodes = a11y.extractScreenNodes()
-            if (a11yNodes.isNotEmpty()) return a11yNodes
-        }
+        return inputController.withCursorHidden {
+            val a11y = AuraAccessibilityService.instance
+            if (a11y != null) {
+                val a11yNodes = a11y.extractScreenNodes()
+                if (a11yNodes.isNotEmpty()) return@withCursorHidden a11yNodes
+            }
 
-        // Fallback to uiautomator dump
-        val res = rootManager.execute("uiautomator dump /sdcard/ui_aura.xml && cat /sdcard/ui_aura.xml")
-        return ScreenXmlParser.parse(res.stdout)
+            // Fallback to uiautomator dump
+            val res = rootManager.execute("uiautomator dump /sdcard/ui_aura.xml && cat /sdcard/ui_aura.xml")
+            ScreenXmlParser.parse(res.stdout)
+        }
     }
 
     suspend fun waitForUiIdle(maxWaitMs: Long = 1000L, pollIntervalMs: Long = 250L): List<ScreenNode> {
@@ -105,8 +107,26 @@ class ScreenAutomationTools(
             }
 
             return if (match != null) {
-                val ok = inputController.tap(match.centerX.toFloat(), match.centerY.toFloat(), "Tap ${match.text.ifEmpty { match.contentDescription }}")
-                ToolExecutionResult(ok, "Tapped '${match.text.ifEmpty { match.contentDescription }}' at (${match.centerX}, ${match.centerY})")
+                com.example.AuraApplication.instance.overlayController.dodgeCaptions(match.centerX, match.centerY)
+                val targetLabel = match.text.ifEmpty { match.contentDescription.ifEmpty { match.resourceId } }
+                val initialNodes = nodes
+                val tapRes = inputController.tapResult(match.centerX.toFloat(), match.centerY.toFloat(), "Tap $targetLabel")
+
+                delay(200)
+                val nodesAfter = getScreenNodes()
+                val screenChanged = nodesAfter.size != initialNodes.size ||
+                        nodesAfter.take(5).map { it.text } != initialNodes.take(5).map { it.text }
+
+                if (!screenChanged) {
+                    Log.w(TAG, "Screen unchanged after tap on '$targetLabel', attempting direct accessibility click and offset tap...")
+                    val a11y = AuraAccessibilityService.instance
+                    val a11yNode = a11y?.findNodeByQuery(query)
+                    val clicked = a11yNode?.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK) ?: false
+                    if (!clicked) {
+                        inputController.tapResult(match.centerX.toFloat() + 4f, match.centerY.toFloat() + 4f, "Retry Tap $targetLabel")
+                    }
+                }
+                ToolExecutionResult(tapRes.success, "Tapped '$targetLabel' via ${tapRes.method} at (${match.centerX}, ${match.centerY})")
             } else {
                 ToolExecutionResult(false, "Could not find element matching '$query' on current screen")
             }
@@ -128,8 +148,9 @@ class ScreenAutomationTools(
         override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
             val x = (args["x"] as? Number)?.toFloat() ?: return ToolExecutionResult(false, "Missing x")
             val y = (args["y"] as? Number)?.toFloat() ?: return ToolExecutionResult(false, "Missing y")
-            val res = inputController.tap(x, y, "Tap ($x, $y)")
-            return ToolExecutionResult(res, if (res) "Tapped at ($x, $y)" else "Failed to tap ($x, $y)")
+            com.example.AuraApplication.instance.overlayController.dodgeCaptions(x.toInt(), y.toInt())
+            val res = inputController.tapResult(x, y, "Tap ($x, $y)")
+            return ToolExecutionResult(res.success, if (res.success) "Tapped at ($x, $y) via ${res.method}" else "Failed to tap ($x, $y): ${res.error}")
         }
     }
 

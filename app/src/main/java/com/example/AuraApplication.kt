@@ -31,6 +31,17 @@ class AuraApplication : Application(), Application.ActivityLifecycleCallbacks {
     lateinit var overlayManager: OverlayManager
         private set
 
+    val overlayController by lazy {
+        com.example.ui.overlay.OverlayController(
+            context = this,
+            preferences = com.example.core.settings.AuraPreferences(this),
+            overlayManager = overlayManager,
+            edgeLightingOverlay = com.example.ui.overlay.EdgeLightingOverlay(this)
+        ).apply {
+            startObserving()
+        }
+    }
+
     companion object {
         private const val TAG = "Aura"
         lateinit var instance: AuraApplication
@@ -58,12 +69,18 @@ class AuraApplication : Application(), Application.ActivityLifecycleCallbacks {
         com.example.core.root.RootManager.ensureConfigured()
 
         overlayManager = OverlayManager(this)
+        com.example.core.telephony.NotificationAnnouncementManager(this, AuraPreferences(this))
 
         appScope.launch {
             try {
                 AuraPreferences(this@AuraApplication).migrateLegacyCredentialsAndEdgeLighting()
             } catch (e: Exception) {
                 Log.e(TAG, "Error running legacy migration: ${e.message}", e)
+            }
+            try {
+                rootManager.execute("settings put global block_untrusted_touches 0")
+            } catch (e: Exception) {
+                Log.w(TAG, "Error disabling untrusted touches on init: ${e.message}")
             }
         }
     }

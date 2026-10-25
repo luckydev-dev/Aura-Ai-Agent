@@ -17,7 +17,7 @@ class OverlayController(
     private val preferences: AuraPreferences,
     private val overlayManager: OverlayManager,
     private val edgeLightingOverlay: EdgeLightingOverlay,
-    private val floatingCaptionOverlay: FloatingCaptionOverlay = FloatingCaptionOverlay(context),
+    val floatingCaptionOverlay: FloatingCaptionOverlay = FloatingCaptionOverlay(context),
     val agentCursorOverlay: AgentCursorOverlay = AgentCursorOverlay(context, AuraApplication.instance.inputController)
 ) {
     companion object {
@@ -121,6 +121,30 @@ class OverlayController(
         }
     }
 
+    fun dodgeCaptions(targetX: Int, targetY: Int) {
+        floatingCaptionOverlay.dodgeIfNeeded(targetX, targetY)
+    }
+
+    /**
+     * Temporarily hides cursor and caption overlay during screenshot/dump capture,
+     * ensuring perfectly clean vision/planner captures.
+     */
+    suspend fun <T> hideForCapture(block: suspend () -> T): T {
+        return AuraApplication.instance.inputController.withCursorHidden {
+            val wasCaptionVisible = floatingCaptionOverlay
+            floatingCaptionOverlay.hideImmediate()
+            // Wait 1 frame (~50ms) to ensure window manager removes/hides before capture
+            delay(50)
+            try {
+                block()
+            } finally {
+                if (latestCaption.auraText.isNotBlank() || latestCaption.userText.isNotBlank()) {
+                    floatingCaptionOverlay.updateCaptions(latestCaption)
+                }
+            }
+        }
+    }
+
     fun updateAmplitudes(micAmp: Float, speakerAmp: Float) {
         this.speakerAmp = speakerAmp
         edgeLightingOverlay.updateAmplitudes(micAmp, speakerAmp)
@@ -203,8 +227,8 @@ class OverlayController(
             }
         }
 
-        // 2. Manage Edge Lighting
-        val shouldShowEdge = edgeEnabled && isCallActive && (!isAppInForeground || showEdgeInApp)
+        // 2. Manage Edge Lighting: keep visible everywhere across all app launches while call is active
+        val shouldShowEdge = edgeEnabled && isCallActive
         if (shouldShowEdge) {
             val targetState = when {
                 isMuted -> EdgeLightingState.MUTED
@@ -217,7 +241,7 @@ class OverlayController(
                     isAuraThinking -> EdgeLightingState.THINKING
                     else -> EdgeLightingState.LISTENING
                 }
-                else -> EdgeLightingState.HIDDEN
+                else -> EdgeLightingState.LISTENING
             }
             edgeLightingOverlay.setState(targetState)
         } else {

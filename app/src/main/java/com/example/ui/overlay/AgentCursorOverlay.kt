@@ -5,7 +5,7 @@ import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
 import android.content.Context
 import android.graphics.*
-import android.os.Build
+import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
 import android.view.View
@@ -15,6 +15,7 @@ import com.example.core.input.InputController
 import com.example.core.input.InputEvent
 import com.example.core.input.InputEventType
 import kotlinx.coroutines.*
+import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.math.hypot
 import kotlin.math.roundToInt
 
@@ -26,7 +27,7 @@ enum class CursorStyle {
 
 enum class CursorSpeed(val durationMultiplier: Float) {
     INSTANT(0f),
-    FAST(0.6f),
+    FAST(0.5f),
     NORMAL(1.0f),
     SLOW(1.5f)
 }
@@ -34,8 +35,9 @@ enum class CursorSpeed(val durationMultiplier: Float) {
 /**
  * High-performance agent mouse pointer overlay.
  * Uses an on-demand transient window architecture that attaches strictly during
- * cursor movements / taps and detaches when idle, guaranteeing ZERO touch blocking
- * or occlusion for the user.
+ * cursor movements / taps and detaches when idle.
+ * Enforces OverlayWindowDefaults.MAX_PASSTHROUGH_ALPHA (0.79f) so it NEVER blocks
+ * or drops user touches on Android 12+ (API 31+).
  */
 class AgentCursorOverlay(
     private val context: Context,
@@ -45,10 +47,14 @@ class AgentCursorOverlay(
         private const val TAG = "Aura"
     }
 
-    private val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+    private val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+    private var activeWindowManager: WindowManager? = null
     private var cursorView: AgentCursorView? = null
+
     @Volatile
-    private var isAttached = false
+    var isAttached = false
+        private set
+
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
     var isEnabled: Boolean = true
@@ -61,50 +67,32 @@ class AgentCursorOverlay(
     var showDuringUnlock: Boolean = false
 
     init {
-        // Synchronize with InputController events
+        // Register cursor listener with InputController
         inputController.cursorListener = { event ->
             handleInputEvent(event)
         }
     }
 
-    /**
-     * Attaches the overlay to WindowManager strictly when needed.
-     * Uses FLAG_NOT_TOUCHABLE and FLAG_NOT_FOCUSABLE so the window can never consume touch events.
-     */
     @Synchronized
-    private fun ensureAttached(): Boolean {
+    fun ensureAttached(): Boolean {
         if (isAttached && cursorView != null) return true
-        if (!Settings.canDrawOverlays(context)) {
-            Log.w(TAG, "Cannot attach AgentCursorOverlay: SYSTEM_ALERT_WINDOW not granted")
+        if (!Settings.canDrawOverlays(context) && !com.example.service.AuraAccessibilityService.isRunning()) {
+            Log.w(TAG, "Cannot attach AgentCursorOverlay: neither SYSTEM_ALERT_WINDOW nor Accessibility active")
             return false
         }
 
         return try {
-            val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-            } else {
-                @Suppress("DEPRECATION")
-                WindowManager.LayoutParams.TYPE_PHONE
-            }
+            val (wm, windowType) = OverlayWindowDefaults.getAppropriateWindowManager(context)
+            activeWindowManager = wm
 
-            val flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
-                    WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
-
-            val params = WindowManager.LayoutParams(
-                WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.MATCH_PARENT,
-                layoutType,
-                flags,
-                PixelFormat.TRANSLUCENT
+            val params = OverlayWindowDefaults.createLayoutParams(
+                title = "AgentCursor",
+                width = WindowManager.LayoutParams.MATCH_PARENT,
+                height = WindowManager.LayoutParams.MATCH_PARENT,
+                alpha = OverlayWindowDefaults.MAX_PASSTHROUGH_ALPHA,
+                isTouchable = false
             ).apply {
-                alpha = 1.0f
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                    layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
-                }
+                type = windowType
             }
 
             val view = AgentCursorView(context).apply {
@@ -116,7 +104,7 @@ class AgentCursorOverlay(
                 }
             }
 
-            windowManager.addView(view, params)
+            wm.addView(view, params)
             cursorView = view
             isAttached = true
             true
@@ -126,26 +114,35 @@ class AgentCursorOverlay(
         }
     }
 
-    /**
-     * Completely removes the overlay from WindowManager so no occluding window sits on screen.
-     */
     @Synchronized
     fun detachOverlay() {
-        if (isAttached && cursorView != null) {
+        OverlayWindowDefaults.unregisterOverlay("AgentCursor")
+        val view = cursorView
+        val wm = activeWindowManager ?: (context.getSystemService(Context.WINDOW_SERVICE) as WindowManager)
+        if (isAttached && view != null) {
             try {
-                windowManager.removeView(cursorView)
+                wm.removeView(view)
             } catch (e: Exception) {
                 Log.e(TAG, "Error removing AgentCursorOverlay: ${e.message}")
             } finally {
                 cursorView = null
                 isAttached = false
+                activeWindowManager = null
             }
         }
     }
 
+    fun setVisibility(visibility: Int) {
+        cursorView?.visibility = visibility
+    }
+
+    fun hideTemporarily() {
+        detachOverlay()
+    }
+
     fun show(): Boolean {
-        // Compatibility helper: attaches if enabled
-        return if (isEnabled) ensureAttached() else false
+        isEnabled = true
+        return true
     }
 
     fun hide() {
@@ -153,7 +150,12 @@ class AgentCursorOverlay(
     }
 
     private suspend fun handleInputEvent(event: InputEvent) {
-        if (!isEnabled) return
+        if (!isEnabled || inputController.isCursorSuppressed) return
+
+        if (!powerManager.isInteractive) {
+            // Screen off / dozing; never stall the input pipeline
+            return
+        }
 
         if (cursorSpeed == CursorSpeed.INSTANT) {
             withContext(Dispatchers.Main) {
@@ -180,7 +182,6 @@ class AgentCursorOverlay(
 
     /**
      * Instantly plays a live cursor preview animation across the screen.
-     * Used when the user selects a new style, speed, or size in Settings.
      */
     fun previewAnimation(
         style: CursorStyle? = null,
@@ -225,6 +226,18 @@ class AgentCursorOverlay(
         }
     }
 
+    /**
+     * Displays calibrated pattern dot markers on screen for durationMs
+     * so user can visually verify alignment over real lock screen dots in the wizard.
+     */
+    fun showCalibrationMarkers(points: List<Pair<Float, Float>>, durationMs: Long = 3000L) {
+        if (!Settings.canDrawOverlays(context)) return
+        scope.launch(Dispatchers.Main) {
+            if (!ensureAttached()) return@launch
+            cursorView?.displayCalibrationMarkers(points, durationMs)
+        }
+    }
+
     fun testDemo() {
         previewAnimation()
     }
@@ -237,7 +250,7 @@ class AgentCursorOverlay(
 
 /**
  * Custom View that renders the mouse pointer, motion trails, tap ripples,
- * long-press progress rings, and action chips with hardware acceleration.
+ * long-press progress rings, action chips, and calibration markers.
  */
 class AgentCursorView(context: Context) : View(context) {
 
@@ -249,6 +262,9 @@ class AgentCursorView(context: Context) : View(context) {
     var showActionLabel: Boolean = true
 
     var onIdleDismissed: (() -> Unit)? = null
+
+    // Track active animators for strict cancellation safety
+    private val activeAnimators = CopyOnWriteArrayList<Animator>()
 
     // Current pointer position & scale
     private var posX = 0f
@@ -267,6 +283,13 @@ class AgentCursorView(context: Context) : View(context) {
     private val trailPoints = mutableListOf<PointF>()
     private val maxTrail = 20
 
+    // Calibration markers
+    private val calibrationPoints = mutableListOf<Pair<Float, Float>>()
+    private var calibrationAlpha = 0f
+
+    // Visual brightness multiplier to compensate for window alpha = 0.79f
+    private val boost = 1.25f
+
     // Paints
     private val arrowFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
@@ -274,9 +297,9 @@ class AgentCursorView(context: Context) : View(context) {
     }
 
     private val arrowStrokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#12121A")
+        color = Color.parseColor("#0C0E14")
         style = Paint.Style.STROKE
-        strokeWidth = 2.0f * density
+        strokeWidth = 2.2f * density
         strokeJoin = Paint.Join.ROUND
         strokeCap = Paint.Cap.ROUND
     }
@@ -284,7 +307,7 @@ class AgentCursorView(context: Context) : View(context) {
     private val dotGlowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.parseColor("#00E5FF")
         style = Paint.Style.FILL
-        maskFilter = BlurMaskFilter(6f * density, BlurMaskFilter.Blur.NORMAL)
+        maskFilter = BlurMaskFilter(7f * density, BlurMaskFilter.Blur.NORMAL)
     }
 
     private val dotInnerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -295,39 +318,39 @@ class AgentCursorView(context: Context) : View(context) {
     private val dotBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.parseColor("#00E5FF")
         style = Paint.Style.STROKE
-        strokeWidth = 2f * density
+        strokeWidth = 2.4f * density
     }
 
     private val glowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.parseColor("#00E5FF")
         style = Paint.Style.STROKE
-        strokeWidth = 3f * density
+        strokeWidth = 3.5f * density
         maskFilter = BlurMaskFilter(4f * density, BlurMaskFilter.Blur.NORMAL)
     }
 
     private val ripplePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.parseColor("#00E5FF")
         style = Paint.Style.STROKE
-        strokeWidth = 2.5f * density
+        strokeWidth = 3f * density
     }
 
     private val trailPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.parseColor("#00E5FF")
         style = Paint.Style.STROKE
-        strokeWidth = 4f * density
+        strokeWidth = 4.5f * density
         strokeCap = Paint.Cap.ROUND
         strokeJoin = Paint.Join.ROUND
     }
 
     private val chipBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(230, 18, 20, 30)
+        color = Color.argb(240, 16, 18, 28)
         style = Paint.Style.FILL
     }
 
     private val chipBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(160, 0, 229, 255)
+        color = Color.parseColor("#00E5FF")
         style = Paint.Style.STROKE
-        strokeWidth = 1f * density
+        strokeWidth = 1.2f * density
     }
 
     private val labelTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -336,9 +359,26 @@ class AgentCursorView(context: Context) : View(context) {
         typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
     }
 
+    private val calibDotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#00E5FF")
+        style = Paint.Style.STROKE
+        strokeWidth = 2.5f * density
+    }
+
+    private val calibFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(120, 0, 229, 255)
+        style = Paint.Style.FILL
+    }
+
+    private val calibTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        textSize = 11f * density
+        typeface = Typeface.DEFAULT_BOLD
+        textAlign = Paint.Align.CENTER
+    }
+
     private val arrowPath = Path()
     private val handPath = Path()
-    private var currentMoveAnimator: ValueAnimator? = null
     private var idleFadeJob: Job? = null
     private val viewScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
@@ -349,6 +389,53 @@ class AgentCursorView(context: Context) : View(context) {
         posY = metrics.heightPixels / 2f
         buildArrowPath()
         buildHandPath()
+    }
+
+    private var restingPulseProgress = 0f
+    private var pulseAnimator: ValueAnimator? = null
+
+    private fun startRestingPulseAnimation() {
+        stopRestingPulseAnimation()
+        pulseAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = 900L
+            repeatMode = ValueAnimator.REVERSE
+            repeatCount = ValueAnimator.INFINITE
+            interpolator = AccelerateDecelerateInterpolator()
+            addUpdateListener {
+                val f = it.animatedValue as Float
+                restingPulseProgress = f
+                pointerScale = 0.96f + 0.10f * f
+                invalidate()
+            }
+        }
+        activeAnimators.add(pulseAnimator!!)
+        pulseAnimator?.start()
+    }
+
+    private fun stopRestingPulseAnimation() {
+        pulseAnimator?.cancel()
+        pulseAnimator?.let { activeAnimators.remove(it) }
+        pulseAnimator = null
+        restingPulseProgress = 0f
+        pointerScale = 1.0f
+    }
+
+    private fun cancelAllAnimators() {
+        idleFadeJob?.cancel()
+        idleFadeJob = null
+        stopRestingPulseAnimation()
+        for (anim in activeAnimators) {
+            try {
+                anim.removeAllListeners()
+                anim.cancel()
+            } catch (e: Exception) {
+                // ignore
+            }
+        }
+        activeAnimators.clear()
+        pointerAlpha = 0f
+        labelAlpha = 0f
+        onIdleDismissed?.invoke()
     }
 
     private fun buildArrowPath() {
@@ -367,7 +454,6 @@ class AgentCursorView(context: Context) : View(context) {
     private fun buildHandPath() {
         val s = cursorSizeDp * density * 0.9f
         handPath.reset()
-        // Stylized pointing hand with index finger pointing at (0, 0)
         handPath.moveTo(0f, 0f)
         handPath.lineTo(s * 0.22f, 0f)
         handPath.lineTo(s * 0.22f, s * 0.55f)
@@ -391,22 +477,51 @@ class AgentCursorView(context: Context) : View(context) {
         rippleRadius = 24f * density
         rippleAlpha = 0.85f
         invalidate()
-        scheduleIdleFade(500L)
+        scheduleIdleFade(400L)
+    }
+
+    fun displayCalibrationMarkers(points: List<Pair<Float, Float>>, durationMs: Long) {
+        calibrationPoints.clear()
+        calibrationPoints.addAll(points)
+        calibrationAlpha = 1.0f
+        pointerAlpha = 0f
+        invalidate()
+
+        viewScope.launch {
+            delay(durationMs)
+            ValueAnimator.ofFloat(1.0f, 0f).apply {
+                duration = 300L
+                addUpdateListener {
+                    calibrationAlpha = it.animatedValue as Float
+                    invalidate()
+                }
+                addListener(object : AnimatorListenerAdapter() {
+                    override fun onAnimationEnd(animation: Animator) {
+                        calibrationPoints.clear()
+                        onIdleDismissed?.invoke()
+                    }
+                })
+                start()
+            }
+        }
     }
 
     suspend fun executeAnimatedEvent(event: InputEvent, speedMult: Float) = suspendCancellableCoroutine<Unit> { cont ->
-        idleFadeJob?.cancel()
-        currentMoveAnimator?.cancel()
+        cancelAllAnimators()
         buildArrowPath()
         buildHandPath()
 
+        cont.invokeOnCancellation {
+            cancelAllAnimators()
+        }
+
         val startX = if (pointerAlpha > 0.05f) posX else event.startX
         val startY = if (pointerAlpha > 0.05f) posY else event.startY
-        val targetX = if (event.type == InputEventType.SWIPE) event.startX else event.startX
-        val targetY = if (event.type == InputEventType.SWIPE) event.startY else event.startY
+        val targetX = event.startX
+        val targetY = event.startY
 
         val dist = hypot(targetX - startX, targetY - startY)
-        val baseDuration = (160L + (dist * 0.25f).toLong()).coerceIn(160L, 420L)
+        val baseDuration = (140L + (dist * 0.22f).toLong()).coerceIn(140L, 380L)
         val glideDuration = (baseDuration * speedMult).toLong()
 
         currentLabel = event.label
@@ -414,7 +529,6 @@ class AgentCursorView(context: Context) : View(context) {
         pointerAlpha = 1f
         trailPoints.clear()
 
-        // Move cursor to start position along smooth interpolation
         val moveAnim = ValueAnimator.ofFloat(0f, 1f).apply {
             duration = glideDuration
             interpolator = AccelerateDecelerateInterpolator()
@@ -426,38 +540,45 @@ class AgentCursorView(context: Context) : View(context) {
             }
             addListener(object : AnimatorListenerAdapter() {
                 override fun onAnimationEnd(animation: Animator) {
+                    activeAnimators.remove(animation)
                     when (event.type) {
                         InputEventType.TAP, InputEventType.DOUBLE_TAP -> {
-                            playTapAnimation(cont)
-                        }
-                        InputEventType.LONG_PRESS -> {
-                            playLongPressAnimation(event.durationMs, cont)
+                            // Resume continuation IMMEDIATELY so real tap is injected concurrently with visual ripple!
+                            if (cont.isActive) cont.resume(Unit) {}
+                            playTapRippleVisual()
                         }
                         InputEventType.SWIPE -> {
-                            playSwipeAnimation(event.startX, event.startY, event.endX, event.endY, event.durationMs, cont)
+                            // Resume immediately so real swipe runs concurrently with cursor drag!
+                            if (cont.isActive) cont.resume(Unit) {}
+                            playSwipeVisual(event.startX, event.startY, event.endX, event.endY, event.durationMs)
+                        }
+                        InputEventType.LONG_PRESS -> {
+                            playLongPressVisual(event.durationMs, cont)
                         }
                         InputEventType.DRAW_PATH -> {
-                            playPathAnimation(event.pathPoints, event.durationMs, cont)
+                            if (cont.isActive) cont.resume(Unit) {}
+                            playPathVisual(event.pathPoints, event.durationMs)
                         }
                         else -> {
                             if (cont.isActive) cont.resume(Unit) {}
-                            scheduleIdleFade(600L)
+                            scheduleIdleFade(500L)
                         }
                     }
                 }
             })
         }
-        currentMoveAnimator = moveAnim
+        activeAnimators.add(moveAnim)
         moveAnim.start()
     }
 
-    private fun playTapAnimation(continuation: CancellableContinuation<Unit>) {
+    private fun playTapRippleVisual() {
+        stopRestingPulseAnimation()
         pointerScale = 0.82f
         rippleRadius = 6f * density
         rippleAlpha = 1.0f
         invalidate()
 
-        ValueAnimator.ofFloat(0f, 1f).apply {
+        val anim = ValueAnimator.ofFloat(0f, 1f).apply {
             duration = 180L
             addUpdateListener {
                 val f = it.animatedValue as Float
@@ -468,17 +589,20 @@ class AgentCursorView(context: Context) : View(context) {
             }
             addListener(object : AnimatorListenerAdapter() {
                 override fun onAnimationEnd(animation: Animator) {
-                    if (continuation.isActive) continuation.resume(Unit) {}
-                    scheduleIdleFade(700L)
+                    activeAnimators.remove(animation)
+                    startRestingPulseAnimation()
+                    scheduleIdleFade(3000L) // 3 seconds resting time (2-4s as requested)
                 }
             })
-            start()
         }
+        activeAnimators.add(anim)
+        anim.start()
     }
 
-    private fun playLongPressAnimation(durationMs: Long, continuation: CancellableContinuation<Unit>) {
+    private fun playLongPressVisual(durationMs: Long, continuation: CancellableContinuation<Unit>) {
+        stopRestingPulseAnimation()
         pointerScale = 0.85f
-        ValueAnimator.ofFloat(0f, 1f).apply {
+        val anim = ValueAnimator.ofFloat(0f, 1f).apply {
             duration = durationMs
             addUpdateListener {
                 longPressProgress = it.animatedValue as Float
@@ -486,27 +610,27 @@ class AgentCursorView(context: Context) : View(context) {
             }
             addListener(object : AnimatorListenerAdapter() {
                 override fun onAnimationEnd(animation: Animator) {
+                    activeAnimators.remove(animation)
                     pointerScale = 1.0f
                     longPressProgress = 0f
                     if (continuation.isActive) continuation.resume(Unit) {}
-                    scheduleIdleFade(700L)
+                    startRestingPulseAnimation()
+                    scheduleIdleFade(2800L)
                 }
             })
-            start()
         }
+        activeAnimators.add(anim)
+        anim.start()
     }
 
-    private fun playSwipeAnimation(
-        x1: Float, y1: Float, x2: Float, y2: Float,
-        durationMs: Long,
-        continuation: CancellableContinuation<Unit>
-    ) {
+    private fun playSwipeVisual(x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long) {
+        stopRestingPulseAnimation()
         pointerScale = 0.90f
         trailPoints.clear()
         trailPoints.add(PointF(x1, y1))
 
-        ValueAnimator.ofFloat(0f, 1f).apply {
-            duration = durationMs.coerceIn(180L, 800L)
+        val anim = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = durationMs.coerceIn(160L, 700L)
             interpolator = AccelerateDecelerateInterpolator()
             addUpdateListener {
                 val f = it.animatedValue as Float
@@ -520,27 +644,25 @@ class AgentCursorView(context: Context) : View(context) {
             }
             addListener(object : AnimatorListenerAdapter() {
                 override fun onAnimationEnd(animation: Animator) {
+                    activeAnimators.remove(animation)
                     pointerScale = 1.0f
                     trailPoints.clear()
-                    if (continuation.isActive) continuation.resume(Unit) {}
-                    scheduleIdleFade(700L)
+                    startRestingPulseAnimation()
+                    scheduleIdleFade(2800L)
                 }
             })
-            start()
         }
+        activeAnimators.add(anim)
+        anim.start()
     }
 
-    private fun playPathAnimation(
-        points: List<Pair<Float, Float>>,
-        durationMs: Long,
-        continuation: CancellableContinuation<Unit>
-    ) {
+    private fun playPathVisual(points: List<Pair<Float, Float>>, durationMs: Long) {
         if (points.size < 2) {
-            if (continuation.isActive) continuation.resume(Unit) {}
-            scheduleIdleFade(400L)
+            scheduleIdleFade(2800L)
             return
         }
 
+        stopRestingPulseAnimation()
         pointerScale = 0.92f
         trailPoints.clear()
         val totalSegments = points.size - 1
@@ -568,17 +690,19 @@ class AgentCursorView(context: Context) : View(context) {
             }
             pointerScale = 1.0f
             trailPoints.clear()
-            if (continuation.isActive) continuation.resume(Unit) {}
-            scheduleIdleFade(600L)
+            startRestingPulseAnimation()
+            scheduleIdleFade(2800L)
         }
     }
 
     private fun scheduleIdleFade(delayMs: Long) {
         idleFadeJob?.cancel()
         idleFadeJob = viewScope.launch {
-            delay(delayMs)
-            ValueAnimator.ofFloat(pointerAlpha, 0f).apply {
-                duration = 220L
+            val adjustedDelay = delayMs.coerceIn(2000L, 4000L)
+            delay(adjustedDelay)
+            stopRestingPulseAnimation()
+            val fadeAnim = ValueAnimator.ofFloat(pointerAlpha, 0f).apply {
+                duration = 250L
                 addUpdateListener {
                     val a = it.animatedValue as Float
                     pointerAlpha = a
@@ -587,16 +711,33 @@ class AgentCursorView(context: Context) : View(context) {
                 }
                 addListener(object : AnimatorListenerAdapter() {
                     override fun onAnimationEnd(animation: Animator) {
+                        activeAnimators.remove(animation)
                         onIdleDismissed?.invoke()
                     }
                 })
-                start()
             }
+            activeAnimators.add(fadeAnim)
+            fadeAnim.start()
         }
     }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
+
+        // Draw calibration markers if active
+        if (calibrationAlpha > 0.01f && calibrationPoints.isNotEmpty()) {
+            calibDotPaint.alpha = (calibrationAlpha * 255).roundToInt()
+            calibFillPaint.alpha = (calibrationAlpha * 120).roundToInt()
+            calibTextPaint.alpha = (calibrationAlpha * 255).roundToInt()
+
+            calibrationPoints.forEachIndexed { idx, pt ->
+                val r = 22f * density
+                canvas.drawCircle(pt.first, pt.second, r, calibFillPaint)
+                canvas.drawCircle(pt.first, pt.second, r, calibDotPaint)
+                canvas.drawText("${idx + 1}", pt.first, pt.second + 4f * density, calibTextPaint)
+            }
+        }
+
         if (pointerAlpha <= 0.01f) return
 
         // 1. Draw trail
@@ -606,14 +747,22 @@ class AgentCursorView(context: Context) : View(context) {
             for (i in 1 until trailPoints.size) {
                 path.lineTo(trailPoints[i].x, trailPoints[i].y)
             }
-            trailPaint.alpha = (pointerAlpha * 180).roundToInt()
+            trailPaint.alpha = ((pointerAlpha * 200 * boost).coerceAtMost(255f)).roundToInt()
             canvas.drawPath(path, trailPaint)
         }
 
         // 2. Draw tap ripple
         if (showRipple && rippleAlpha > 0.01f) {
-            ripplePaint.alpha = (rippleAlpha * 255).roundToInt()
+            ripplePaint.alpha = ((rippleAlpha * 255 * boost).coerceAtMost(255f)).roundToInt()
             canvas.drawCircle(posX, posY, rippleRadius, ripplePaint)
+        }
+
+        // 2b. Draw breathing pulse aura ring when resting
+        if (restingPulseProgress > 0.01f) {
+            val auraRadius = (16f + restingPulseProgress * 12f) * density
+            val auraAlpha = ((pointerAlpha * (1f - restingPulseProgress) * 160 * boost).coerceIn(0f, 255f)).roundToInt()
+            ripplePaint.alpha = auraAlpha
+            canvas.drawCircle(posX, posY, auraRadius, ripplePaint)
         }
 
         // 3. Draw long press progress ring
@@ -629,8 +778,9 @@ class AgentCursorView(context: Context) : View(context) {
         canvas.translate(posX, posY)
         canvas.scale(pointerScale, pointerScale)
 
-        arrowFillPaint.alpha = (pointerAlpha * 255).roundToInt()
-        arrowStrokePaint.alpha = (pointerAlpha * 255).roundToInt()
+        val alpha255 = ((pointerAlpha * 255 * boost).coerceAtMost(255f)).roundToInt()
+        arrowFillPaint.alpha = alpha255
+        arrowStrokePaint.alpha = alpha255
 
         when (cursorStyle) {
             CursorStyle.ARROW -> {
@@ -639,9 +789,9 @@ class AgentCursorView(context: Context) : View(context) {
             }
             CursorStyle.DOT -> {
                 val r = (cursorSizeDp * 0.45f) * density
-                dotGlowPaint.alpha = (pointerAlpha * 180).roundToInt()
-                dotInnerPaint.alpha = (pointerAlpha * 255).roundToInt()
-                dotBorderPaint.alpha = (pointerAlpha * 255).roundToInt()
+                dotGlowPaint.alpha = ((pointerAlpha * 200 * boost).coerceAtMost(255f)).roundToInt()
+                dotInnerPaint.alpha = alpha255
+                dotBorderPaint.alpha = alpha255
 
                 canvas.drawCircle(0f, 0f, r + 3f * density, dotGlowPaint)
                 canvas.drawCircle(0f, 0f, r, dotInnerPaint)
@@ -667,9 +817,9 @@ class AgentCursorView(context: Context) : View(context) {
             val chipTop = posY + 6f * density
             val chipRect = RectF(chipLeft, chipTop, chipLeft + chipW, chipTop + chipH)
 
-            chipBgPaint.alpha = (labelAlpha * 220).roundToInt()
-            chipBorderPaint.alpha = (labelAlpha * 140).roundToInt()
-            labelTextPaint.alpha = (labelAlpha * 255).roundToInt()
+            chipBgPaint.alpha = ((labelAlpha * 240 * boost).coerceAtMost(255f)).roundToInt()
+            chipBorderPaint.alpha = ((labelAlpha * 180 * boost).coerceAtMost(255f)).roundToInt()
+            labelTextPaint.alpha = ((labelAlpha * 255 * boost).coerceAtMost(255f)).roundToInt()
 
             canvas.drawRoundRect(chipRect, 6f * density, 6f * density, chipBgPaint)
             canvas.drawRoundRect(chipRect, 6f * density, 6f * density, chipBorderPaint)

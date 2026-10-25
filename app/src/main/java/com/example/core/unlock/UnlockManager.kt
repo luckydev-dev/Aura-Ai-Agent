@@ -2,16 +2,17 @@ package com.example.core.unlock
 
 import android.app.KeyguardManager
 import android.content.Context
-import android.os.Build
 import android.os.PowerManager
 import android.util.Log
 import android.view.accessibility.AccessibilityNodeInfo
+import com.example.AuraApplication
 import com.example.core.input.InputController
 import com.example.core.root.RootManager
+import com.example.core.settings.AuraPreferences
 import com.example.core.settings.EncryptedKeyStorage
 import com.example.service.AuraAccessibilityService
 import kotlinx.coroutines.*
-import java.util.concurrent.ConcurrentLinkedQueue
+import kotlinx.coroutines.flow.first
 
 enum class UnlockStatus {
     UNLOCKED,
@@ -21,6 +22,7 @@ enum class UnlockStatus {
     BOUNCER_NOT_SHOWN,
     CREDENTIAL_REJECTED_OR_LOCKED_OUT,
     RATE_LIMITED,
+    DEVICE_NOT_FIRST_UNLOCKED,
     TIMEOUT,
     CANCELLED
 }
@@ -33,27 +35,20 @@ data class UnlockResult(
 
 /**
  * Verified, root-first Phone Unlock state machine.
- * Enforces hard security limits, real bouncer detection, exact credential entry,
- * lockout backoff, and full verification without guessing pattern geometry.
+ * Enforces UnlockSafetyPolicy, multi-OEM BouncerDetector, single-stroke pattern gesture,
+ * proper shell escaping, and truthful verification.
  */
 class UnlockManager(
     private val context: Context,
     private val rootManager: RootManager,
     private val inputController: InputController,
     private val encryptedStorage: EncryptedKeyStorage,
-    private val patternLocator: PatternGridLocator
+    private val patternLocator: PatternGridLocator,
+    val safetyPolicy: UnlockSafetyPolicy = UnlockSafetyPolicy(AuraPreferences(context)),
+    private val bouncerDetector: BouncerDetector = BouncerDetector(rootManager, inputController)
 ) {
     companion object {
         private const val TAG = "Aura"
-
-        // Safety Rate Limits: max 3 entries per 10 minutes
-        private const val MAX_ATTEMPTS_PER_WINDOW = 3
-        private const val WINDOW_MS = 10 * 60 * 1000L
-
-        private val attemptTimestamps = ConcurrentLinkedQueue<Long>()
-        @Volatile
-        var lockoutUntilMs: Long = 0L
-            private set
 
         @Volatile
         var isCancelled: Boolean = false
@@ -63,20 +58,18 @@ class UnlockManager(
 
         fun getInstance(context: Context): UnlockManager {
             return INSTANCE ?: synchronized(this) {
-                val app = context.applicationContext as com.example.AuraApplication
+                val app = context.applicationContext as AuraApplication
                 val root = app.rootManager
                 val input = app.inputController
                 val storage = EncryptedKeyStorage(context.applicationContext)
                 val locator = PatternGridLocator(context.applicationContext, root, input, storage)
-                UnlockManager(context.applicationContext, root, input, storage, locator).also { INSTANCE = it }
+                val prefs = AuraPreferences(context.applicationContext)
+                val safety = UnlockSafetyPolicy(prefs)
+                val bouncer = BouncerDetector(root, input)
+                UnlockManager(context.applicationContext, root, input, storage, locator, safety, bouncer).also { INSTANCE = it }
             }
         }
 
-        /**
-         * Android Pattern Lock auto-middle-dot rule:
-         * In a 3x3 grid (0..8), connecting two straight collinear non-adjacent dots
-         * automatically includes the unvisited middle dot.
-         */
         fun applyMiddleDotRule(raw: List<Int>): List<Int> {
             if (raw.size < 2) return raw
             val result = mutableListOf<Int>()
@@ -110,21 +103,27 @@ class UnlockManager(
 
     private val keyguardManager = context.getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
     private val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+    private val prefs = AuraPreferences(context)
 
-    /**
-     * Checks if device is currently locked.
-     */
     suspend fun isLocked(): Boolean {
         if (!keyguardManager.isKeyguardLocked) return false
-        // Root cross-check
         val res = rootManager.execute("dumpsys window | grep -E \"mShowing=true|mKeyguardShowing=true\"")
         return res.stdout.isNotBlank() || keyguardManager.isKeyguardLocked
     }
 
     /**
-     * Executes the complete verified unlock sequence.
-     * @param dryRunOnlyBouncer If true, only wakes and reveals the bouncer without typing credentials.
+     * Checks if device is in Direct Boot mode (after reboot, prior to first user unlock).
      */
+    private suspend fun isDeviceFirstUnlocked(): Boolean {
+        if (keyguardManager.isDeviceLocked) {
+            val res = rootManager.execute("dumpsys trust | grep -i \"user is unlocked\"")
+            if (res.stdout.isNotBlank() && res.stdout.contains("false", ignoreCase = true)) {
+                return false
+            }
+        }
+        return true
+    }
+
     suspend fun executeUnlock(dryRunOnlyBouncer: Boolean = false): UnlockResult = withContext(Dispatchers.IO) {
         val stepLog = mutableListOf<String>()
         fun logStep(msg: String) {
@@ -145,32 +144,28 @@ class UnlockManager(
             )
         }
 
-        // Step 2: Rate limit and lockout check
-        val now = System.currentTimeMillis()
-        if (now < lockoutUntilMs) {
-            val remainSec = ((lockoutUntilMs - now) / 1000L).coerceAtLeast(1)
-            logStep("Device lockout active. Retry in $remainSec s.")
+        // Check Direct Boot first unlock
+        if (!isDeviceFirstUnlocked()) {
+            logStep("Device is in Direct Boot state (not unlocked after reboot). Keystore locked.")
             return@withContext UnlockResult(
-                UnlockStatus.RATE_LIMITED,
-                "Phone is temporarily locked out. Try again in $remainSec seconds.",
+                UnlockStatus.DEVICE_NOT_FIRST_UNLOCKED,
+                "Device was just restarted. Android requires manual first unlock before apps can access storage.",
                 stepLog
             )
         }
 
-        // Prune old timestamps
-        while (attemptTimestamps.peek() != null && now - attemptTimestamps.peek() > WINDOW_MS) {
-            attemptTimestamps.poll()
-        }
-        if (attemptTimestamps.size >= MAX_ATTEMPTS_PER_WINDOW) {
-            logStep("Exceeded 3 unlock attempts within 10 minutes.")
+        // Step 2: Safety rate limit check (only consecutive wrong attempts trigger limit)
+        val (safetyAllowed, safetyReason) = safetyPolicy.canAttemptUnlock()
+        if (!safetyAllowed) {
+            logStep("Unlock blocked by Safety Policy: $safetyReason")
             return@withContext UnlockResult(
                 UnlockStatus.RATE_LIMITED,
-                "Safety limit reached (3 attempts/10m). Please unlock manually.",
+                safetyReason ?: "Safety limit active. Unlock manually.",
                 stepLog
             )
         }
 
-        // Step 3: Preconditions (credentials & services)
+        // Step 3: Check credentials
         val lockType = encryptedStorage.getLockType().uppercase()
         val hasCredentials = when (lockType) {
             "PIN" -> encryptedStorage.getLockPin().isNotBlank()
@@ -198,6 +193,28 @@ class UnlockManager(
             )
         }
 
+        val showCursor = prefs.showCursorDuringUnlock.first()
+
+        if (showCursor) {
+            performUnlockAttempt(lockType, dryRunOnlyBouncer, hasRoot, stepLog)
+        } else {
+            inputController.withCursorHidden {
+                performUnlockAttempt(lockType, dryRunOnlyBouncer, hasRoot, stepLog)
+            }
+        }
+    }
+
+    private suspend fun performUnlockAttempt(
+        lockType: String,
+        dryRunOnlyBouncer: Boolean,
+        hasRoot: Boolean,
+        stepLog: MutableList<String>
+    ): UnlockResult {
+        fun logStep(msg: String) {
+            Log.i(TAG, "[Unlock] $msg")
+            stepLog.add(msg)
+        }
+
         // Step 4: Wake up device
         logStep("2. Waking up device screen...")
         if (!powerManager.isInteractive) {
@@ -212,82 +229,104 @@ class UnlockManager(
                 wakeLock.acquire(3000)
             }
 
+            delay(300)
+            if (!powerManager.isInteractive && hasRoot) {
+                rootManager.execute("input keyevent 82") // KEYCODE_MENU fallback
+            }
+
             var wakePoll = 0
-            while (!powerManager.isInteractive && wakePoll < 14) {
-                delay(150)
+            while (!powerManager.isInteractive && wakePoll < 10) {
+                delay(100)
                 wakePoll++
             }
         }
         logStep("Screen is interactive: ${powerManager.isInteractive}")
 
         if (isCancelled) {
-            logStep("Unlock cancelled by user.")
-            return@withContext UnlockResult(UnlockStatus.CANCELLED, "Unlock was cancelled.", stepLog)
+            return UnlockResult(UnlockStatus.CANCELLED, "Unlock was cancelled.", stepLog)
         }
 
-        // Step 5: Show the bouncer
+        // Step 5: Reveal bouncer
         logStep("3. Dismissing keyguard / Swiping up for bouncer...")
         if (hasRoot) {
             rootManager.execute("wm dismiss-keyguard")
         }
 
-        // Swipe up from bottom to center
-        val metrics = inputController.getDisplayMetrics()
-        val w = metrics.x.toFloat()
-        val h = metrics.y.toFloat()
-        inputController.swipe(w * 0.5f, h * 0.88f, w * 0.5f, h * 0.30f, 250L, "Dismiss Keyguard")
+        var bouncerCheck = bouncerDetector.detectBouncer(lockType)
+        if (!bouncerCheck.isShowing) {
+            // Swipe up
+            val metrics = inputController.getDisplayMetrics()
+            val w = metrics.x.toFloat()
+            val h = metrics.y.toFloat()
+            inputController.swipe(w * 0.5f, h * 0.88f, w * 0.5f, h * 0.30f, 250L, "Dismiss Keyguard")
 
-        // Step 6: Wait for bouncer
-        logStep("4. Waiting for bouncer credential UI to appear...")
-        var bouncerFound = false
-        var bouncerCheckCount = 0
-        while (bouncerCheckCount < 20) {
-            delay(150)
-            bouncerCheckCount++
-            if (isBouncerShowing(lockType)) {
-                bouncerFound = true
-                break
+            var waitPoll = 0
+            while (waitPoll < 12) {
+                delay(120)
+                waitPoll++
+                bouncerCheck = bouncerDetector.detectBouncer(lockType)
+                if (bouncerCheck.isShowing) break
             }
         }
 
-        if (!bouncerFound) {
-            // Second attempt swipe
+        if (!bouncerCheck.isShowing) {
+            // Retry swipe
             logStep("Bouncer not detected on first attempt, retrying swipe...")
-            inputController.swipe(w * 0.5f, h * 0.90f, w * 0.5f, h * 0.25f, 280L, "Retry Swipe")
-            delay(600)
-            bouncerFound = isBouncerShowing(lockType)
+            val metrics = inputController.getDisplayMetrics()
+            inputController.swipe(metrics.x * 0.5f, metrics.y * 0.90f, metrics.x * 0.5f, metrics.y * 0.25f, 280L, "Retry Swipe")
+            delay(400)
+            bouncerCheck = bouncerDetector.detectBouncer(lockType)
         }
 
-        if (!bouncerFound) {
+        if (!bouncerCheck.isShowing) {
             logStep("Bouncer did not appear. Aborting credential entry for safety.")
-            return@withContext UnlockResult(
+            return UnlockResult(
                 UnlockStatus.BOUNCER_NOT_SHOWN,
                 "Lock screen bouncer did not appear. Please wake phone manually.",
                 stepLog
             )
         }
-        logStep("Bouncer confirmed showing.")
+        logStep("Bouncer confirmed showing (type=${bouncerCheck.type}, score=${bouncerCheck.score})")
 
         if (dryRunOnlyBouncer) {
             logStep("Dry run mode: Bouncer displayed successfully.")
-            return@withContext UnlockResult(
+            return UnlockResult(
                 UnlockStatus.UNLOCKED,
                 "Dry run: Bouncer displayed successfully.",
                 stepLog
             )
         }
 
-        // Step 7: Enter Credential ONCE
-        logStep("5. Entering credentials ($lockType)...")
-        attemptTimestamps.add(System.currentTimeMillis())
+        // Step 6: Enter Credential ONCE
+        logStep("4. Entering credentials ($lockType)...")
 
         when (lockType) {
             "PIN" -> {
                 val pin = encryptedStorage.getLockPin()
+                var pinSuccess = false
                 if (hasRoot) {
-                    rootManager.execute("input text $pin && input keyevent 66")
-                } else {
-                    enterPinViaAccessibility(pin)
+                    val res = rootManager.execute("input text $pin && sleep 0.1 && input keyevent 66")
+                    delay(400)
+                    if (!isLocked()) {
+                        pinSuccess = true
+                    }
+                }
+
+                if (!pinSuccess) {
+                    if (bouncerCheck.keypadNodes.isNotEmpty()) {
+                        logStep("Entering PIN via keypad coordinates...")
+                        pin.forEach { digitChar ->
+                            val pt = bouncerCheck.keypadNodes[digitChar.toString()]
+                            if (pt != null) {
+                                inputController.tap(pt.first, pt.second, "PIN $digitChar")
+                                delay(100)
+                            }
+                        }
+                        delay(150)
+                        inputController.pressKey(66, "Enter")
+                    } else {
+                        enterPinViaAccessibility(pin)
+                    }
                 }
             }
             "PASSWORD" -> {
@@ -295,9 +334,16 @@ class UnlockManager(
                 val a11y = AuraAccessibilityService.instance
                 val textSet = a11y?.setTextOnActiveNode(password) ?: false
                 if (!textSet) {
-                    inputController.typeText(password, "Enter Password")
+                    val escaped = escapeShellArg(password)
+                    if (hasRoot) {
+                        rootManager.execute("input text $escaped && sleep 0.1 && input keyevent 66")
+                    } else {
+                        inputController.typeText(password, "Enter Password")
+                        inputController.pressKey(66, "Enter")
+                    }
+                } else {
+                    inputController.pressKey(66, "Enter")
                 }
-                inputController.pressKey(66, "Enter")
             }
             "PATTERN" -> {
                 val rawPoints = encryptedStorage.getPatternPoints()
@@ -314,14 +360,13 @@ class UnlockManager(
                     detection.points[idx]
                 }
 
-                // Add small waypoints to guarantee every dot is hit
                 val duration = (points.size * 140L).coerceAtLeast(600L)
                 inputController.drawPath(screenCoords, duration, "Draw Pattern")
             }
         }
 
-        // Step 8: Verify unlock outcome
-        logStep("6. Verifying lock dismissal...")
+        // Step 7: Verify unlock outcome
+        logStep("5. Verifying lock dismissal...")
         var verifiedUnlocked = false
         var pollVerify = 0
         while (pollVerify < 16) {
@@ -335,7 +380,8 @@ class UnlockManager(
 
         if (verifiedUnlocked) {
             logStep("✓ Phone unlocked successfully!")
-            return@withContext UnlockResult(
+            safetyPolicy.recordSuccess()
+            return UnlockResult(
                 UnlockStatus.UNLOCKED,
                 "Phone unlocked successfully.",
                 stepLog
@@ -344,78 +390,44 @@ class UnlockManager(
 
         // If still locked, check screen text for rejection / lockout
         val screenText = getLockscreenErrorText()
-        logStep("Lockscreen diagnostic text: $screenText")
+        logStep("Lockscreen text: $screenText")
 
-        if (screenText.contains("try again", ignoreCase = true) ||
-            screenText.contains("wrong", ignoreCase = true) ||
-            screenText.contains("incorrect", ignoreCase = true) ||
-            screenText.contains("too many", ignoreCase = true)
-        ) {
-            // Check lockout seconds
-            val secMatch = Regex("""(?:in|after)\s+(\d+)\s*(?:seconds|s)""").find(screenText)
-            val lockoutSec = secMatch?.groupValues?.get(1)?.toLongOrNull() ?: 30L
-            lockoutUntilMs = System.currentTimeMillis() + (lockoutSec * 1000L)
-            logStep("Credential rejected or lockout triggered ($lockoutSec s).")
+        val isRejected = screenText.contains("try again", ignoreCase = true) ||
+                screenText.contains("wrong", ignoreCase = true) ||
+                screenText.contains("incorrect", ignoreCase = true) ||
+                screenText.contains("too many", ignoreCase = true)
 
-            return@withContext UnlockResult(
+        if (isRejected) {
+            val lockoutMs = safetyPolicy.recordFailure(screenText)
+            val secRemain = ((lockoutMs - System.currentTimeMillis()) / 1000L).coerceAtLeast(1)
+            logStep("Credential rejected or lockout triggered ($secRemain s remain).")
+
+            return UnlockResult(
                 UnlockStatus.CREDENTIAL_REJECTED_OR_LOCKED_OUT,
-                "Credential was rejected or phone is locked out for $lockoutSec seconds.",
+                "Credential was rejected. Cooldown for $secRemain seconds.",
                 stepLog
             )
         }
 
         logStep("Unlock timed out waiting for keyguard to clear.")
-        return@withContext UnlockResult(
+        return UnlockResult(
             UnlockStatus.TIMEOUT,
             "Unlock timed out. The phone is still locked.",
             stepLog
         )
     }
 
-    private suspend fun isBouncerShowing(lockType: String): Boolean {
-        val a11y = AuraAccessibilityService.instance
-        if (a11y != null) {
-            val root = a11y.rootInActiveWindow
-            if (root != null) {
-                if (checkBouncerInNode(root, lockType)) return true
+    private fun escapeShellArg(text: String): String {
+        val sb = StringBuilder()
+        for (c in text) {
+            when (c) {
+                ' ', '\\', '"', '\'', '$', '`', '&', ';', '|', '<', '>', '(', ')', '{', '}', '[', ']', '*', '?', '~' -> {
+                    sb.append('\\').append(c)
+                }
+                else -> sb.append(c)
             }
         }
-
-        // Root uiautomator check
-        val dumpRes = rootManager.execute("uiautomator dump /data/local/tmp/aura_ui.xml && cat /data/local/tmp/aura_ui.xml")
-        if (dumpRes.success) {
-            val xml = dumpRes.stdout
-            return when (lockType) {
-                "PATTERN" -> xml.contains("LockPatternView", ignoreCase = true) || xml.contains("lockPattern", ignoreCase = true)
-                "PIN" -> xml.contains("pinEntry", ignoreCase = true) || xml.contains("keyguard_pin", ignoreCase = true) || xml.contains("keyguard_selector_fade_container", ignoreCase = true)
-                "PASSWORD" -> xml.contains("passwordEntry", ignoreCase = true) || xml.contains("isPassword=\"true\"", ignoreCase = true)
-                else -> true
-            }
-        }
-        return false
-    }
-
-    private fun checkBouncerInNode(node: AccessibilityNodeInfo, lockType: String): Boolean {
-        val cls = node.className?.toString() ?: ""
-        val id = node.viewIdResourceName?.toString() ?: ""
-
-        when (lockType) {
-            "PATTERN" -> {
-                if (cls.contains("LockPatternView", ignoreCase = true) || id.contains("lockPattern", ignoreCase = true)) return true
-            }
-            "PIN" -> {
-                if (id.contains("pinEntry", ignoreCase = true) || id.contains("keyguard_pin", ignoreCase = true) || node.text == "1") return true
-            }
-            "PASSWORD" -> {
-                if (id.contains("passwordEntry", ignoreCase = true) || node.isPassword) return true
-            }
-        }
-
-        for (i in 0 until node.childCount) {
-            val child = node.getChild(i) ?: continue
-            if (checkBouncerInNode(child, lockType)) return true
-        }
-        return false
+        return sb.toString()
     }
 
     private suspend fun enterPinViaAccessibility(pin: String) {

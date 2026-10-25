@@ -63,6 +63,84 @@ class OwnerVoiceVerifier(private val context: Context) {
     }
 
     @SuppressLint("MissingPermission")
+    suspend fun recordSinglePhrase(
+        durationSec: Int = 3,
+        onProgress: (Float) -> Unit
+    ): Result<ShortArray> = withContext(Dispatchers.IO) {
+        val bufferSize = maxOf(
+            AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT),
+            4096
+        )
+
+        var audioRecord: AudioRecord? = null
+        try {
+            audioRecord = AudioRecord(
+                MediaRecorder.AudioSource.MIC,
+                SAMPLE_RATE,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                bufferSize
+            )
+
+            if (audioRecord.state != AudioRecord.STATE_INITIALIZED) {
+                return@withContext Result.failure(IllegalStateException("AudioRecord failed to initialize"))
+            }
+
+            audioRecord.startRecording()
+
+            val totalSamplesToRead = SAMPLE_RATE * durationSec
+            val audioData = ShortArray(totalSamplesToRead)
+            var samplesRead = 0
+            val readChunk = ShortArray(1024)
+
+            while (samplesRead < totalSamplesToRead) {
+                val read = audioRecord.read(readChunk, 0, minOf(readChunk.size, totalSamplesToRead - samplesRead))
+                if (read > 0) {
+                    System.arraycopy(readChunk, 0, audioData, samplesRead, read)
+                    samplesRead += read
+                    onProgress(samplesRead.toFloat() / totalSamplesToRead.toFloat())
+                }
+            }
+
+            audioRecord.stop()
+            audioRecord.release()
+            audioRecord = null
+
+            val rms = computeRMS(audioData)
+            if (rms < 150) {
+                return@withContext Result.failure(IllegalStateException("Voice recording was too quiet. Please speak louder."))
+            }
+
+            Result.success(audioData)
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception recording phrase sample", e)
+            try { audioRecord?.release() } catch (_: Exception) {}
+            Result.failure(e)
+        }
+    }
+
+    fun combineAndSaveThreePhrases(phraseSamples: List<ShortArray>): Result<OwnerVoiceProfile> {
+        if (phraseSamples.isEmpty()) {
+            return Result.failure(IllegalArgumentException("No phrase samples provided."))
+        }
+
+        val totalSize = phraseSamples.sumOf { it.size }
+        val combinedData = ShortArray(totalSize)
+        var offset = 0
+        for (sample in phraseSamples) {
+            System.arraycopy(sample, 0, combinedData, offset, sample.size)
+            offset += sample.size
+        }
+
+        val profile = extractProfile(combinedData, totalSize)
+            ?: return Result.failure(IllegalStateException("Voice sample features could not be extracted. Please speak clearly."))
+
+        saveProfile(profile)
+        Log.i(TAG, "3-Phrase owner voice profile saved: F0=${profile.f0Mean}Hz, Std=${profile.f0Std}, Centroid=${profile.spectralCentroid}")
+        return Result.success(profile)
+    }
+
+    @SuppressLint("MissingPermission")
     suspend fun enrollOwnerVoice(
         onProgress: (Float) -> Unit
     ): Result<OwnerVoiceProfile> = withContext(Dispatchers.IO) {

@@ -33,9 +33,21 @@ class AuraNotificationListener : NotificationListenerService() {
             return notificationCache.values.sortedByDescending { it.postTime }
         }
 
-        fun replyToNotification(key: String, message: String): Boolean {
+        fun replyToNotification(queryOrKey: String, message: String): Boolean {
             val inst = instance ?: return false
-            val item = notificationCache[key] ?: return false
+            val cleanMsg = message.trim().removeSuffix("/").removeSuffix("/?").trim()
+            val item = notificationCache[queryOrKey] ?: run {
+                val q = queryOrKey.trim().lowercase(java.util.Locale.ROOT)
+                notificationCache.values
+                    .sortedByDescending { it.postTime }
+                    .firstOrNull { cached ->
+                        cached.key == queryOrKey ||
+                        cached.packageName.lowercase(java.util.Locale.ROOT).contains(q) ||
+                        cached.appName.lowercase(java.util.Locale.ROOT).contains(q) ||
+                        cached.title.lowercase(java.util.Locale.ROOT).contains(q) ||
+                        cached.text.lowercase(java.util.Locale.ROOT).contains(q)
+                    }
+            } ?: return false
             val notif = item.sbn.notification ?: return false
 
             val actions = notif.actions ?: return false
@@ -43,7 +55,7 @@ class AuraNotificationListener : NotificationListenerService() {
                 val remoteInputs = action.remoteInputs ?: continue
                 for (remoteInput in remoteInputs) {
                     val bundle = Bundle().apply {
-                        putCharSequence(remoteInput.resultKey, message)
+                        putCharSequence(remoteInput.resultKey, cleanMsg)
                     }
                     val intent = Intent()
                     RemoteInput.addResultsToIntent(arrayOf(remoteInput), intent, bundle)
@@ -88,6 +100,9 @@ class AuraNotificationListener : NotificationListenerService() {
         sbn ?: return
         cacheSbn(sbn)
         checkVoipIncomingCall(sbn)
+        val manager = com.example.core.telephony.NotificationAnnouncementManager.instance
+            ?: com.example.core.telephony.NotificationAnnouncementManager(this, com.example.core.settings.AuraPreferences(this))
+        manager.processNotification(sbn)
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification?) {
@@ -110,8 +125,29 @@ class AuraNotificationListener : NotificationListenerService() {
 
             if (isCallCategory || isCallText) {
                 val pkg = sbn.packageName ?: ""
-                val appLabel = if (pkg.contains("whatsapp")) "WhatsApp" else if (pkg.contains("telegram")) "Telegram" else pkg
-                val caller = if (title.isNotBlank() && !title.contains("call", ignoreCase = true)) title else text
+                val appLabel = when {
+                    pkg.contains("whatsapp") -> "WhatsApp"
+                    pkg.contains("telegram") -> "Telegram"
+                    pkg.contains("dialer") || pkg.contains("telecom") || pkg.contains("incallui") -> "Phone"
+                    else -> {
+                        try {
+                            val pm = packageManager
+                            val ai = pm.getApplicationInfo(pkg, 0)
+                            pm.getApplicationLabel(ai).toString()
+                        } catch (e: Exception) {
+                            "Phone"
+                        }
+                    }
+                }
+                var caller = if (title.isNotBlank() && !title.contains("call", ignoreCase = true)) {
+                    title
+                } else if (text.isNotBlank() && !text.contains("call", ignoreCase = true) && !text.contains("calling", ignoreCase = true) && !text.contains("incoming", ignoreCase = true)) {
+                    text
+                } else {
+                    title.ifBlank { text }
+                }
+                caller = caller.replace(Regex("""(?i)^(whatsapp\s+call\s+from\s+|incoming\s+call\s+from\s+|call\s+from\s+)"""), "").trim()
+                if (caller.isBlank()) caller = "Unknown"
 
                 CallAnnouncementManager.instance?.onVoipCallDetected(appLabel, caller)
             }

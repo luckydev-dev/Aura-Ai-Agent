@@ -52,6 +52,81 @@ class CommTools(
         return null
     }
 
+    suspend fun sendWhatsappInternal(target: String, message: String): ToolExecutionResult {
+        var cleanMessage = message.trim()
+        while (cleanMessage.endsWith("/") || cleanMessage.endsWith("/?")) {
+            cleanMessage = cleanMessage.removeSuffix("/?").removeSuffix("/").trim()
+        }
+
+        val contactInfo = resolveContactNumber(target)
+        val phone = contactInfo?.second ?: target.replace(Regex("""[^\d+]"""), "")
+
+        val isBusiness = preferences.isWhatsappBusiness.first()
+        val pkg = if (isBusiness) "com.whatsapp.w4b" else "com.whatsapp"
+
+        val rawDigits = phone.replace(Regex("""[^\d]"""), "")
+        val cleanPhone = if (rawDigits.length == 10) "91$rawDigits" else rawDigits
+
+        var intentDispatched = false
+
+        // 1. First attempt: Direct JID Intent (no URL parsing quirks, avoids '/?' additions)
+        if (cleanPhone.isNotBlank()) {
+            try {
+                val directIntent = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    setPackage(pkg)
+                    putExtra(Intent.EXTRA_TEXT, cleanMessage)
+                    putExtra("jid", "$cleanPhone@s.whatsapp.net")
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(directIntent)
+                intentDispatched = true
+            } catch (e: Exception) {
+                android.util.Log.w("Aura", "Direct JID WhatsApp intent failed: ${e.message}")
+            }
+        }
+
+        // 2. Second attempt: Custom scheme whatsapp://send (NOT https://api.whatsapp.com)
+        if (!intentDispatched && cleanPhone.isNotBlank()) {
+            try {
+                val encodedMsg = URLEncoder.encode(cleanMessage, "UTF-8").replace("+", "%20")
+                val uri = Uri.parse("whatsapp://send?phone=$cleanPhone&text=$encodedMsg")
+                val schemeIntent = Intent(Intent.ACTION_VIEW, uri).apply {
+                    setPackage(pkg)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(schemeIntent)
+                intentDispatched = true
+            } catch (e: Exception) {
+                android.util.Log.w("Aura", "Custom scheme whatsapp:// intent failed: ${e.message}")
+            }
+        }
+
+        // 3. Fallback: root am start
+        if (!intentDispatched && cleanPhone.isNotBlank()) {
+            val encodedMsg = URLEncoder.encode(cleanMessage, "UTF-8").replace("+", "%20")
+            rootManager.execute("am start -a android.intent.action.VIEW -d \"whatsapp://send?phone=$cleanPhone&text=$encodedMsg\" $pkg")
+        }
+
+        delay(1800)
+
+        val dumpRes = rootManager.execute("uiautomator dump /sdcard/ui_wa.xml && cat /sdcard/ui_wa.xml")
+        val nodes = ScreenXmlParser.parse(dumpRes.stdout)
+        val sendButton = nodes.find {
+            it.resourceId.contains("send") ||
+            it.contentDescription.equals("Send", ignoreCase = true) ||
+            it.contentDescription.contains("भेजें")
+        }
+
+        return if (sendButton != null) {
+            val ok = com.example.AuraApplication.instance.inputController.tap(sendButton.centerX.toFloat(), sendButton.centerY.toFloat(), "Send WhatsApp")
+            ToolExecutionResult(ok, "Sent WhatsApp message to ${contactInfo?.first ?: phone}: '$cleanMessage'")
+        } else {
+            val ok = com.example.AuraApplication.instance.inputController.pressKey(66, "Send")
+            ToolExecutionResult(ok, "Opened WhatsApp and sent message to ${contactInfo?.first ?: phone}: '$cleanMessage'")
+        }
+    }
+
     val sendWhatsappTool = object : Tool {
         override val name = "send_whatsapp"
         override val description = "Sends a WhatsApp message to a contact name or phone number."
@@ -67,45 +142,7 @@ class CommTools(
         override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
             val target = args["contact_or_number"]?.toString() ?: return ToolExecutionResult(false, "Missing contact")
             val message = args["message"]?.toString() ?: return ToolExecutionResult(false, "Missing message")
-
-            val contactInfo = resolveContactNumber(target)
-            val phone = contactInfo?.second ?: target.replace(Regex("""[^\d+]"""), "")
-
-            val isBusiness = preferences.isWhatsappBusiness.first()
-            val pkg = if (isBusiness) "com.whatsapp.w4b" else "com.whatsapp"
-
-            val encodedMsg = URLEncoder.encode(message, "UTF-8")
-            val uri = Uri.parse("https://api.whatsapp.com/send?phone=$phone&text=$encodedMsg")
-
-            val intent = Intent(Intent.ACTION_VIEW, uri).apply {
-                setPackage(pkg)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-
-            try {
-                context.startActivity(intent)
-            } catch (e: Exception) {
-                android.util.Log.w("Aura", "startActivity for WhatsApp failed, trying root am start fallback: ${e.message}")
-                rootManager.execute("am start -a android.intent.action.VIEW -d \"$uri\" $pkg")
-            }
-
-            delay(2200)
-
-            val dumpRes = rootManager.execute("uiautomator dump /sdcard/ui_wa.xml && cat /sdcard/ui_wa.xml")
-            val nodes = ScreenXmlParser.parse(dumpRes.stdout)
-            val sendButton = nodes.find {
-                it.resourceId == "send" ||
-                it.contentDescription.equals("Send", ignoreCase = true) ||
-                it.contentDescription.contains("भेजें")
-            }
-
-            return if (sendButton != null) {
-                val ok = com.example.AuraApplication.instance.inputController.tap(sendButton.centerX.toFloat(), sendButton.centerY.toFloat(), "Send WhatsApp")
-                ToolExecutionResult(ok, "Sent WhatsApp message to ${contactInfo?.first ?: phone}")
-            } else {
-                val ok = com.example.AuraApplication.instance.inputController.pressKey(66, "Send")
-                ToolExecutionResult(ok, "Opened chat with message prefilled and tapped send.")
-            }
+            return sendWhatsappInternal(target, message)
         }
     }
 
@@ -354,24 +391,38 @@ class CommTools(
 
     val replyToNotificationTool = object : Tool {
         override val name = "reply_to_notification"
-        override val description = "Sends an inline reply to a notification."
+        override val description = "Sends an inline reply to a notification by notification_id, sender name, or app name (e.g. 'whatsapp', 'Rahul')."
         override val parametersSchema = mapOf(
             "type" to "object",
             "properties" to mapOf(
-                "notification_id" to mapOf("type" to "string", "description" to "The key/id of the notification."),
+                "contact_or_id" to mapOf("type" to "string", "description" to "The contact name, app name (e.g. 'whatsapp'), or notification key/id to reply to."),
                 "message" to mapOf("type" to "string", "description" to "The reply message.")
             ),
-            "required" to listOf("notification_id", "message")
+            "required" to listOf("message")
         )
 
         override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
-            val id = args["notification_id"]?.toString() ?: return ToolExecutionResult(false, "Missing notification id")
+            val target = args["contact_or_id"]?.toString()
+                ?: args["notification_id"]?.toString()
+                ?: args["contact"]?.toString()
+                ?: args["target"]?.toString()
+                ?: "whatsapp"
             val message = args["message"]?.toString() ?: return ToolExecutionResult(false, "Missing message")
-            val success = AuraNotificationListener.replyToNotification(id, message)
-            return if (success) {
-                ToolExecutionResult(true, "Replied successfully.")
+            var cleanMsg = message.trim()
+            while (cleanMsg.endsWith("/") || cleanMsg.endsWith("/?")) {
+                cleanMsg = cleanMsg.removeSuffix("/?").removeSuffix("/").trim()
+            }
+
+            val success = AuraNotificationListener.replyToNotification(target, cleanMsg)
+            if (success) {
+                return ToolExecutionResult(true, "Replied successfully to notification ($target): '$cleanMsg'")
+            }
+
+            val waRes = sendWhatsappInternal(target, cleanMsg)
+            return if (waRes.success) {
+                ToolExecutionResult(true, "Replied via WhatsApp to $target: '$cleanMsg'")
             } else {
-                ToolExecutionResult(false, "Notification does not support inline reply or was dismissed.")
+                ToolExecutionResult(false, "Notification reply failed and WhatsApp fallback failed: ${waRes.output}")
             }
         }
     }
@@ -434,10 +485,45 @@ class CommTools(
         }
     }
 
+    val configureCallAutoRejectTool = object : Tool {
+        override val name = "configure_call_auto_reject"
+        override val description = "Configures automatic incoming call rejection and auto-reply message via SMS and WhatsApp."
+        override val parametersSchema = mapOf(
+            "type" to "object",
+            "properties" to mapOf(
+                "enabled" to mapOf("type" to "boolean", "description" to "true to auto-reject incoming calls, false to disable auto-reject."),
+                "message" to mapOf("type" to "string", "description" to "The busy message text to send to callers (e.g. 'Mai busy hu, baad me call karta hu')."),
+                "reply_via_sms" to mapOf("type" to "boolean", "description" to "Whether to send busy SMS to cellular callers (default true)."),
+                "reply_via_whatsapp" to mapOf("type" to "boolean", "description" to "Whether to send busy WhatsApp message to WhatsApp/known callers (default true).")
+            ),
+            "required" to listOf("enabled")
+        )
+
+        override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
+            val enabled = args["enabled"] as? Boolean ?: return ToolExecutionResult(false, "Missing 'enabled' parameter")
+            val msg = args["message"]?.toString()
+            val replySms = args["reply_via_sms"] as? Boolean
+            val replyWhatsapp = args["reply_via_whatsapp"] as? Boolean
+
+            preferences.configureCallAutoReject(
+                enabled = enabled,
+                message = msg,
+                replySms = replySms,
+                replyWhatsapp = replyWhatsapp
+            )
+            val desc = if (enabled) {
+                "Auto-reject calls enabled with busy message: '${msg ?: "Mai busy hu, baad me call karta hu."}' (SMS: ${replySms ?: true}, WhatsApp: ${replyWhatsapp ?: true})"
+            } else {
+                "Auto-reject calls disabled"
+            }
+            return ToolExecutionResult(true, desc)
+        }
+    }
+
     fun getAllTools(): List<Tool> = listOf(
         sendWhatsappTool, sendSmsTool, makeCallTool, answerCallTool, rejectCallTool,
         rejectCallWithMessageTool, silenceRingerTool, endCallTool,
         readSmsTool, readCallLogTool, readNotificationsTool, replyToNotificationTool,
-        dismissNotificationTool, searchContactsTool
+        dismissNotificationTool, searchContactsTool, configureCallAutoRejectTool
     )
 }

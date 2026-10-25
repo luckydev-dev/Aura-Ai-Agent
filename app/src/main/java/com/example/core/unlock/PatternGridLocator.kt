@@ -53,7 +53,7 @@ class PatternGridLocator(
             return GridDetectionResult(treePoints, "UI_TREE", isCalibrated = true)
         }
 
-        // 3. Try Screenshot computer vision
+        // 3. Try Screenshot computer vision (with cursor hidden)
         val cvPoints = detectFromScreenshot()
         if (cvPoints != null && cvPoints.size == 9) {
             Log.i(TAG, "Pattern grid detected via screenshot computer vision blobs")
@@ -82,8 +82,10 @@ class PatternGridLocator(
             }
         }
 
-        // Try root uiautomator dump
-        val dumpRes = rootManager.execute("uiautomator dump /data/local/tmp/aura_ui.xml && cat /data/local/tmp/aura_ui.xml")
+        // Try root uiautomator dump wrapped with cursor hidden
+        val dumpRes = inputController.withCursorHidden {
+            rootManager.execute("uiautomator dump /data/local/tmp/aura_ui.xml && cat /data/local/tmp/aura_ui.xml")
+        }
         if (dumpRes.success && dumpRes.stdout.isNotBlank()) {
             val xml = dumpRes.stdout
             val patternRegex = Regex("""class="[^"]*(?:LockPatternView|PatternView|pattern)[^"]*"\s+bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"""")
@@ -160,7 +162,9 @@ class PatternGridLocator(
 
     private suspend fun detectFromScreenshot(): List<Pair<Float, Float>>? {
         val shotPath = "/data/local/tmp/aura_lock_shot.png"
-        val res = rootManager.execute("screencap -p $shotPath")
+        val res = inputController.withCursorHidden {
+            rootManager.execute("screencap -p $shotPath")
+        }
         if (!res.success) return null
 
         val localFile = File(shotPath)
@@ -174,7 +178,6 @@ class PatternGridLocator(
         val startY = (h * 0.40f).toInt()
         val searchH = (h * 0.55f).toInt()
 
-        // Downscale for fast blob luminance analysis
         val scale = 0.25f
         val scaledW = (w * scale).toInt()
         val scaledH = (searchH * scale).toInt()
@@ -228,7 +231,7 @@ class PatternGridLocator(
         return if (result.size == 9) result else null
     }
 
-    private fun computeHeuristicAosp(): List<Pair<Float, Float>> {
+    fun computeHeuristicAosp(): List<Pair<Float, Float>> {
         val size = inputController.getDisplayMetrics()
         val w = size.x.toFloat()
         val h = size.y.toFloat()

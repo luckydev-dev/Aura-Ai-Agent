@@ -100,6 +100,27 @@ class AuraPreferences(
         val KEY_CALL_ANNOUNCEMENT_ENABLED = booleanPreferencesKey("call_announcement_enabled")
         val KEY_CALL_ANNOUNCE_WHATSAPP = booleanPreferencesKey("call_announce_whatsapp")
         val KEY_CALL_AUTO_ANSWER_VOICE = booleanPreferencesKey("call_auto_answer_voice")
+        val KEY_CALL_AUTO_REJECT_ENABLED = booleanPreferencesKey("call_auto_reject_enabled")
+        val KEY_CALL_AUTO_REJECT_MESSAGE = stringPreferencesKey("call_auto_reject_message")
+        val KEY_CALL_AUTO_REPLY_SMS = booleanPreferencesKey("call_auto_reply_sms")
+        val KEY_CALL_AUTO_REPLY_WHATSAPP = booleanPreferencesKey("call_auto_reply_whatsapp")
+
+        // Notification Announcement System
+        val KEY_NOTIF_ANNOUNCE_ENABLED = booleanPreferencesKey("notif_announce_enabled")
+        val KEY_NOTIF_ANNOUNCE_APPS = stringSetPreferencesKey("notif_announce_apps")
+        val KEY_NOTIF_ANNOUNCE_READ_CONTENT = booleanPreferencesKey("notif_announce_read_content")
+
+        // Owner Voice Security Lock
+        val KEY_OWNER_VOICE_LOCK_ENABLED = booleanPreferencesKey("owner_voice_lock_enabled")
+
+        val DEFAULT_ANNOUNCE_APPS = setOf(
+            "com.whatsapp",
+            "com.whatsapp.w4b",
+            "org.telegram.messenger",
+            "com.google.android.apps.messaging",
+            "com.google.android.gm",
+            "com.instagram.android"
+        )
 
         // Safe Mode
         val KEY_SAFE_MODE_TRIGGERED = booleanPreferencesKey("safe_mode_triggered")
@@ -114,6 +135,16 @@ class AuraPreferences(
         val KEY_DISABLED_TOOLS = stringSetPreferencesKey("disabled_tools")
         val KEY_WHATSAPP_BUSINESS = booleanPreferencesKey("whatsapp_business")
         val KEY_ONBOARDING_COMPLETED = booleanPreferencesKey("onboarding_completed")
+
+        // Unlock Safety Policy
+        val KEY_UNLOCK_CONSECUTIVE_FAILURES = intPreferencesKey("unlock_consecutive_failures")
+        val KEY_UNLOCK_BLOCKED_UNTIL_MS = longPreferencesKey("unlock_blocked_until_ms")
+
+        // Floating Captions Customization
+        val KEY_INTERACTIVE_CAPTIONS_HANDLE = booleanPreferencesKey("interactive_captions_handle") // default false
+        val KEY_CAPTION_POSITION = stringPreferencesKey("caption_position") // "BOTTOM", "TOP"
+        val KEY_CAPTION_AUTO_HIDE_SECONDS = intPreferencesKey("caption_auto_hide_seconds") // default 4
+        val KEY_CAPTION_TRANSPARENCY = floatPreferencesKey("caption_transparency") // default 0.90f
 
         const val DEFAULT_MODEL = "gemini-3.8-live"
         const val DEFAULT_VOICE = "Aoede"
@@ -443,6 +474,38 @@ class AuraPreferences(
         it[KEY_CALL_AUTO_ANSWER_VOICE] ?: true
     }
 
+    val callAutoRejectEnabled: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_CALL_AUTO_REJECT_ENABLED] ?: false
+    }
+
+    val callAutoRejectMessage: Flow<String> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_CALL_AUTO_REJECT_MESSAGE] ?: "Mai busy hu, baad me call karta hu."
+    }
+
+    val callAutoReplySms: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_CALL_AUTO_REPLY_SMS] ?: true
+    }
+
+    val callAutoReplyWhatsapp: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_CALL_AUTO_REPLY_WHATSAPP] ?: true
+    }
+
+    val notifAnnounceEnabled: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_NOTIF_ANNOUNCE_ENABLED] ?: false
+    }
+
+    val notifAnnounceApps: Flow<Set<String>> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_NOTIF_ANNOUNCE_APPS] ?: DEFAULT_ANNOUNCE_APPS
+    }
+
+    val notifAnnounceReadContent: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_NOTIF_ANNOUNCE_READ_CONTENT] ?: true
+    }
+
+    val ownerVoiceLockEnabled: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_OWNER_VOICE_LOCK_ENABLED] ?: false
+    }
+
     // Secure Screen Lock Credentials & Options (Stored in EncryptedKeyStorage)
     private val _credentialTrigger = kotlinx.coroutines.flow.MutableStateFlow(System.currentTimeMillis())
 
@@ -546,6 +609,35 @@ class AuraPreferences(
         it[KEY_WHATSAPP_BUSINESS] ?: false
     }
 
+    val unlockConsecutiveFailures: Flow<Int> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_UNLOCK_CONSECUTIVE_FAILURES] ?: 0
+    }
+
+    val unlockBlockedUntilMs: Flow<Long> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_UNLOCK_BLOCKED_UNTIL_MS] ?: 0L
+    }
+
+    val interactiveCaptionsHandle: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_INTERACTIVE_CAPTIONS_HANDLE] ?: false
+    }
+
+    val captionPosition: Flow<String> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_CAPTION_POSITION] ?: "BOTTOM"
+    }
+
+    val captionAutoHideSeconds: Flow<Int> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_CAPTION_AUTO_HIDE_SECONDS] ?: 4
+    }
+
+    val captionTransparency: Flow<Float> = context.dataStore.data.catch { emitDefaults(it) }.map {
+        it[KEY_CAPTION_TRANSPARENCY] ?: 0.90f
+    }
+
+    val interactiveCaptionsHandleFlow: Flow<Boolean> get() = interactiveCaptionsHandle
+    val captionPositionFlow: Flow<String> get() = captionPosition
+    val captionAutoHideSecondsFlow: Flow<Int> get() = captionAutoHideSeconds
+    val captionTransparencyFlow: Flow<Float> get() = captionTransparency
+
     val isOnboardingCompleted: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
         it[KEY_ONBOARDING_COMPLETED] ?: false
     }
@@ -614,6 +706,44 @@ class AuraPreferences(
     suspend fun setCallAnnouncementEnabled(enabled: Boolean) = context.dataStore.edit { it[KEY_CALL_ANNOUNCEMENT_ENABLED] = enabled }
     suspend fun setCallAnnounceWhatsapp(enabled: Boolean) = context.dataStore.edit { it[KEY_CALL_ANNOUNCE_WHATSAPP] = enabled }
     suspend fun setCallAutoAnswerVoice(enabled: Boolean) = context.dataStore.edit { it[KEY_CALL_AUTO_ANSWER_VOICE] = enabled }
+    suspend fun setCallAutoRejectEnabled(enabled: Boolean) = context.dataStore.edit { it[KEY_CALL_AUTO_REJECT_ENABLED] = enabled }
+    suspend fun setCallAutoRejectMessage(msg: String) = context.dataStore.edit { it[KEY_CALL_AUTO_REJECT_MESSAGE] = msg.trim() }
+    suspend fun setCallAutoReplySms(enabled: Boolean) = context.dataStore.edit { it[KEY_CALL_AUTO_REPLY_SMS] = enabled }
+    suspend fun setCallAutoReplyWhatsapp(enabled: Boolean) = context.dataStore.edit { it[KEY_CALL_AUTO_REPLY_WHATSAPP] = enabled }
+
+    suspend fun configureCallAutoReject(
+        enabled: Boolean,
+        message: String? = null,
+        replySms: Boolean? = null,
+        replyWhatsapp: Boolean? = null
+    ) {
+        context.dataStore.edit { prefs ->
+            prefs[KEY_CALL_AUTO_REJECT_ENABLED] = enabled
+            if (message != null && message.isNotBlank()) {
+                prefs[KEY_CALL_AUTO_REJECT_MESSAGE] = message.trim()
+            }
+            if (replySms != null) {
+                prefs[KEY_CALL_AUTO_REPLY_SMS] = replySms
+            }
+            if (replyWhatsapp != null) {
+                prefs[KEY_CALL_AUTO_REPLY_WHATSAPP] = replyWhatsapp
+            }
+        }
+    }
+
+    suspend fun setNotifAnnounceEnabled(enabled: Boolean) = context.dataStore.edit { it[KEY_NOTIF_ANNOUNCE_ENABLED] = enabled }
+    suspend fun setNotifAnnounceApps(apps: Set<String>) = context.dataStore.edit { it[KEY_NOTIF_ANNOUNCE_APPS] = apps }
+    suspend fun toggleNotifAnnounceApp(packageName: String) = context.dataStore.edit { prefs ->
+        val cur = prefs[KEY_NOTIF_ANNOUNCE_APPS]?.toMutableSet() ?: DEFAULT_ANNOUNCE_APPS.toMutableSet()
+        if (cur.contains(packageName)) {
+            cur.remove(packageName)
+        } else {
+            cur.add(packageName)
+        }
+        prefs[KEY_NOTIF_ANNOUNCE_APPS] = cur
+    }
+    suspend fun setNotifAnnounceReadContent(readContent: Boolean) = context.dataStore.edit { it[KEY_NOTIF_ANNOUNCE_READ_CONTENT] = readContent }
+    suspend fun setOwnerVoiceLockEnabled(enabled: Boolean) = context.dataStore.edit { it[KEY_OWNER_VOICE_LOCK_ENABLED] = enabled }
 
     suspend fun setSafeModeTriggered(triggered: Boolean) = context.dataStore.edit { it[KEY_SAFE_MODE_TRIGGERED] = triggered }
 
@@ -652,18 +782,22 @@ class AuraPreferences(
     suspend fun setScreenLockType(type: String) {
         encryptedKeyStorage.setLockType(type)
         _credentialTrigger.value = System.currentTimeMillis()
+        resetUnlockSafetyLimit()
     }
     suspend fun setSavedPatternPoints(points: String) {
         encryptedKeyStorage.setPatternPoints(points)
         _credentialTrigger.value = System.currentTimeMillis()
+        resetUnlockSafetyLimit()
     }
     suspend fun setSavedLockPin(pin: String) {
         encryptedKeyStorage.setLockPin(pin)
         _credentialTrigger.value = System.currentTimeMillis()
+        resetUnlockSafetyLimit()
     }
     suspend fun setSavedLockPassword(password: String) {
         encryptedKeyStorage.setLockPassword(password)
         _credentialTrigger.value = System.currentTimeMillis()
+        resetUnlockSafetyLimit()
     }
     suspend fun setConfirmBeforeUnlock(confirm: Boolean) {
         encryptedKeyStorage.setConfirmBeforeUnlock(confirm)
@@ -677,6 +811,18 @@ class AuraPreferences(
         encryptedKeyStorage.setPatternCalibrationJson(json)
         _credentialTrigger.value = System.currentTimeMillis()
     }
+
+    suspend fun setUnlockConsecutiveFailures(count: Int) = context.dataStore.edit { it[KEY_UNLOCK_CONSECUTIVE_FAILURES] = count }
+    suspend fun setUnlockBlockedUntilMs(timestamp: Long) = context.dataStore.edit { it[KEY_UNLOCK_BLOCKED_UNTIL_MS] = timestamp }
+    suspend fun resetUnlockSafetyLimit() = context.dataStore.edit {
+        it[KEY_UNLOCK_CONSECUTIVE_FAILURES] = 0
+        it[KEY_UNLOCK_BLOCKED_UNTIL_MS] = 0L
+    }
+
+    suspend fun setInteractiveCaptionsHandle(enabled: Boolean) = context.dataStore.edit { it[KEY_INTERACTIVE_CAPTIONS_HANDLE] = enabled }
+    suspend fun setCaptionPosition(position: String) = context.dataStore.edit { it[KEY_CAPTION_POSITION] = position }
+    suspend fun setCaptionAutoHideSeconds(sec: Int) = context.dataStore.edit { it[KEY_CAPTION_AUTO_HIDE_SECONDS] = sec }
+    suspend fun setCaptionTransparency(alpha: Float) = context.dataStore.edit { it[KEY_CAPTION_TRANSPARENCY] = alpha }
 
     suspend fun migrateLegacyCredentialsAndEdgeLighting() {
         try {

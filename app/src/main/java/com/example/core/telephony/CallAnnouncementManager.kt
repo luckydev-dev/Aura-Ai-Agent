@@ -94,6 +94,12 @@ class CallAnnouncementManager(
                 activeCallerNumber = callerNumber
 
                 scope.launch {
+                    val autoReject = preferences.callAutoRejectEnabled.first()
+                    if (autoReject) {
+                        executeAutoReject(contactName ?: callerNumber.ifBlank { "Caller" }, callerNumber, isVoip = false)
+                        return@launch
+                    }
+
                     val enabled = preferences.callAnnouncementEnabled.first()
                     if (enabled) {
                         announceIncomingCall(contactName ?: callerNumber.ifBlank { "Unknown Caller" }, isVoip = false)
@@ -116,22 +122,107 @@ class CallAnnouncementManager(
 
     fun onVoipCallDetected(appName: String, caller: String) {
         scope.launch {
+            val cleanAppName = when {
+                appName.lowercase().contains("whatsapp") -> "WhatsApp"
+                appName.lowercase().contains("telegram") -> "Telegram"
+                appName.lowercase().contains("phone") || appName.lowercase().contains("dialer") -> "Phone"
+                appName.contains(".") -> "Phone"
+                else -> appName
+            }
+            val cleanCaller = caller.replace(Regex("""(?i)^(whatsapp\s+call\s+from\s+|call\s+from\s+)"""), "").trim()
+
+            isRinging = true
+            isVoipCall = true
+            activeCallerName = cleanCaller
+            activeCallerNumber = ""
+
+            val autoReject = preferences.callAutoRejectEnabled.first()
+            if (autoReject) {
+                executeAutoReject(cleanCaller, "", isVoip = true, appName = cleanAppName)
+                return@launch
+            }
+
             val enabled = preferences.callAnnouncementEnabled.first()
             val allowWhatsapp = preferences.callAnnounceWhatsapp.first()
             if (enabled && allowWhatsapp) {
-                isRinging = true
-                isVoipCall = true
-                activeCallerName = caller
-                activeCallerNumber = ""
-                announceIncomingCall(caller, isVoip = true, appName = appName)
+                announceIncomingCall(cleanCaller, isVoip = true, appName = cleanAppName)
             }
+        }
+    }
+
+    private suspend fun executeAutoReject(caller: String, number: String, isVoip: Boolean, appName: String? = null) {
+        Log.i(TAG, "Executing auto-reject for incoming call from $caller ($number, isVoip=$isVoip)...")
+        rejectCall()
+
+        val autoReplyMsg = preferences.callAutoRejectMessage.first().ifBlank { "Mai busy hu, baad me call karta hu." }
+        var cleanMsg = autoReplyMsg.trim()
+        while (cleanMsg.endsWith("/") || cleanMsg.endsWith("/?")) {
+            cleanMsg = cleanMsg.removeSuffix("/?").removeSuffix("/").trim()
+        }
+
+        val sendSms = preferences.callAutoReplySms.first()
+        val sendWa = preferences.callAutoReplyWhatsapp.first()
+
+        var smsSent = false
+        var waSent = false
+
+        if (sendSms && number.isNotBlank()) {
+            try {
+                val sms = SmsManager.getDefault()
+                val parts = sms.divideMessage(cleanMsg)
+                sms.sendMultipartTextMessage(number, null, parts, null, null)
+                smsSent = true
+            } catch (e: Exception) {
+                val res = rootManager.execute("service call isms 7 i32 0 s16 \"com.android.mms\" s16 \"$number\" s16 \"null\" s16 \"$cleanMsg\"")
+                smsSent = res.success
+            }
+        }
+
+        if (sendWa) {
+            val waTarget = if (number.isNotBlank()) number else caller
+            sendWhatsappDirect(waTarget, cleanMsg)
+            waSent = true
+        }
+
+        AuraForegroundService.currentService?.let { service ->
+            service.liveClient.sendTextMessage("[SYSTEM EVENT: Auto-rejected call from $caller. Busy message sent (SMS=$smsSent, WhatsApp=$waSent): \"$cleanMsg\"]")
+        }
+    }
+
+    private suspend fun sendWhatsappDirect(target: String, message: String) {
+        try {
+            val isBusiness = preferences.isWhatsappBusiness.first()
+            val pkg = if (isBusiness) "com.whatsapp.w4b" else "com.whatsapp"
+            val digits = target.replace(Regex("""[^\d]"""), "")
+            val phone = if (digits.length == 10) "91$digits" else digits
+
+            var cleanMsg = message.trim()
+            while (cleanMsg.endsWith("/") || cleanMsg.endsWith("/?")) {
+                cleanMsg = cleanMsg.removeSuffix("/?").removeSuffix("/").trim()
+            }
+
+            if (phone.isNotBlank()) {
+                val directIntent = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    setPackage(pkg)
+                    putExtra(Intent.EXTRA_TEXT, cleanMsg)
+                    putExtra("jid", "$phone@s.whatsapp.net")
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(directIntent)
+                delay(1200)
+                rootManager.execute("input keyevent 66")
+            } else {
+                AuraNotificationListener.replyToNotification(target, cleanMsg)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed sending auto-reply via WhatsApp: ${e.message}", e)
         }
     }
 
     private fun announceIncomingCall(caller: String, isVoip: Boolean, appName: String? = null) {
         scope.launch {
             try {
-                // Duck ringer stream to 5% as requested so ring is soft while announcement is clear
                 val maxRing = audioManager.getStreamMaxVolume(AudioManager.STREAM_RING)
                 val softRing = (maxRing * 0.05f).toInt().coerceAtLeast(1)
                 audioManager.setStreamVolume(AudioManager.STREAM_RING, softRing, 0)
@@ -140,16 +231,25 @@ class CallAnnouncementManager(
             }
 
             val owner = preferences.ownerName.first().ifBlank { "Boss" }
+            val cleanApp = when {
+                appName?.lowercase()?.contains("whatsapp") == true -> "WhatsApp"
+                appName?.lowercase()?.contains("telegram") == true -> "Telegram"
+                appName?.lowercase()?.contains("phone") == true -> "Phone"
+                appName?.contains(".") == true -> "Phone"
+                else -> appName ?: "Phone"
+            }
+            val cleanCaller = caller.replace(Regex("""(?i)^(whatsapp\s+call\s+from\s+|call\s+from\s+)"""), "").trim()
+
             val announcement = if (isVoip) {
-                "$owner, ${appName ?: "WhatsApp"} par $caller ka call aa raha hai. Uthau ya kaat du?"
+                "$owner, $cleanApp par $cleanCaller ka call aa raha hai. Uthau ya kaat du?"
             } else {
-                "$owner, $caller ka phone aa raha hai. Uthau ya kaat du?"
+                "$owner, $cleanCaller ka phone aa raha hai. Uthau ya kaat du?"
             }
 
             Log.i(TAG, "Incoming call announcement: $announcement")
 
             AuraForegroundService.currentService?.let { service ->
-                service.liveClient.sendTextMessage("[SYSTEM EVENT: Incoming Call from $caller. Say immediately: \"$announcement\"]")
+                service.liveClient.sendTextMessage("[SYSTEM EVENT: Incoming Call from $cleanCaller. Say immediately: \"$announcement\"]")
             }
         }
     }
@@ -272,6 +372,11 @@ class CallAnnouncementManager(
         if (!rejected) {
             val res = com.example.AuraApplication.instance.inputController.pressKey(6, "Reject Call")
             rejected = res
+        }
+
+        if (!rejected) {
+            val rootRes = rootManager.execute("telecom end-call || input keyevent 6 || service call phone 5 || service call phone 6")
+            if (rootRes.success) rejected = true
         }
 
         isRinging = false

@@ -68,6 +68,7 @@ enum class SettingsCategory(
     OWNER_VOICE("Owner Voice & Security", "Voice enrollment, offline wake word, and screen lock automation", Icons.Default.Person),
     PERMISSIONS("System Permissions", "Manage Accessibility, Overlay, Notifications, Mic, and Phone permissions", Icons.Default.Security),
     SPEECH_CALLS("Speech, Language & Calls", "Hinglish default, live captions, incoming call announcements, soft ring", Icons.Default.PhoneCallback),
+    NOTIFICATION_DETECT("Notification Announcements", "Watch selected apps & announce messages out loud in real time", Icons.Default.NotificationsActive),
     DEVICE_TOOLS("Device Automation & Tools", "Autonomous planner, device control tools, permissions, and timeouts", Icons.Default.Build)
 }
 
@@ -119,12 +120,21 @@ fun SettingsScreen(
     val edgeLightingIntensity by preferences.edgeLightingIntensity.collectAsState(initial = 1.0f)
     val floatingCaptionsEnabled by preferences.floatingCaptionsEnabled.collectAsState(initial = true)
     val overlayEnabled by preferences.overlayEnabled.collectAsState(initial = false)
+    val interactiveCaptionsHandle by preferences.interactiveCaptionsHandleFlow.collectAsState(initial = false)
+    val captionPosition by preferences.captionPositionFlow.collectAsState(initial = "bottom")
+    val captionAutoHideSeconds by preferences.captionAutoHideSecondsFlow.collectAsState(initial = 5)
+    val captionTransparency by preferences.captionTransparencyFlow.collectAsState(initial = 0.9f)
 
     val idleSilenceMinutes by preferences.idleSilenceMinutes.collectAsState(initial = 5)
     val keepAliveScreenOff by preferences.keepAliveScreenOff.collectAsState(initial = false)
     val screenOffTimeoutMinutes by preferences.screenOffTimeoutMinutes.collectAsState(initial = 3)
     val plannerModelName by preferences.plannerModelName.collectAsState(initial = "gemini-2.5-flash")
     val plannerUseScreenshots by preferences.plannerUseScreenshots.collectAsState(initial = true)
+
+    val notifAnnounceEnabled by preferences.notifAnnounceEnabled.collectAsState(initial = false)
+    val notifAnnounceApps by preferences.notifAnnounceApps.collectAsState(initial = AuraPreferences.DEFAULT_ANNOUNCE_APPS)
+    val notifAnnounceReadContent by preferences.notifAnnounceReadContent.collectAsState(initial = true)
+    var customPackageInput by remember { mutableStateOf("") }
 
     val ownerName by preferences.ownerName.collectAsState(initial = AuraPreferences.DEFAULT_OWNER_NAME)
     val extraInstructions by preferences.extraInstructions.collectAsState(initial = "")
@@ -478,10 +488,86 @@ fun SettingsScreen(
                                     Spacer(modifier = Modifier.height(12.dp))
                                     AuraToggleRow(
                                         title = "Floating Live Captions",
-                                        subtitle = "Compact auto-expanding live subtitle pill over external apps.",
+                                        subtitle = "Compact auto-expanding live subtitle pill over external apps. Click-through by default.",
                                         checked = floatingCaptionsEnabled,
                                         onCheckedChange = { scope.launch { preferences.setFloatingCaptionsEnabled(it) } }
                                     )
+                                    if (floatingCaptionsEnabled) {
+                                        Spacer(modifier = Modifier.height(8.dp))
+                                        Column(modifier = Modifier.padding(start = 12.dp)) {
+                                            AuraToggleRow(
+                                                title = "Allow moving captions",
+                                                subtitle = "Adds a small 40dp drag handle to reposition the pill.",
+                                                checked = interactiveCaptionsHandle,
+                                                onCheckedChange = { scope.launch { preferences.setInteractiveCaptionsHandle(it) } }
+                                            )
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Text("Pill Position", style = typography.bodySmall.copy(color = colors.textPrimary))
+                                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                                    listOf("top" to "Top", "bottom" to "Bottom").forEach { (pos, label) ->
+                                                        val isSelected = captionPosition == pos
+                                                        Button(
+                                                            onClick = { scope.launch { preferences.setCaptionPosition(pos) } },
+                                                            colors = ButtonDefaults.buttonColors(
+                                                                containerColor = if (isSelected) colors.accentStart else colors.surfaceRaised,
+                                                                contentColor = if (isSelected) Color.White else colors.textPrimary
+                                                            ),
+                                                            shape = RoundedCornerShape(8.dp),
+                                                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                                            modifier = Modifier.height(32.dp)
+                                                        ) {
+                                                            Text(label, fontSize = 12.sp)
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Text("Auto-Hide Delay", style = typography.bodySmall.copy(color = colors.textPrimary))
+                                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                                    listOf(3 to "3s", 5 to "5s", 10 to "10s", 0 to "Never").forEach { (sec, label) ->
+                                                        val isSelected = captionAutoHideSeconds == sec
+                                                        Button(
+                                                            onClick = { scope.launch { preferences.setCaptionAutoHideSeconds(sec) } },
+                                                            colors = ButtonDefaults.buttonColors(
+                                                                containerColor = if (isSelected) colors.accentStart else colors.surfaceRaised,
+                                                                contentColor = if (isSelected) Color.White else colors.textPrimary
+                                                            ),
+                                                            shape = RoundedCornerShape(8.dp),
+                                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                                            modifier = Modifier.height(32.dp)
+                                                        ) {
+                                                            Text(label, fontSize = 11.sp)
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            Spacer(modifier = Modifier.height(8.dp))
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Text("Opacity (${(captionTransparency * 100).toInt()}%)", style = typography.bodySmall.copy(color = colors.textPrimary))
+                                                Slider(
+                                                    value = captionTransparency,
+                                                    onValueChange = { scope.launch { preferences.setCaptionTransparency(it) } },
+                                                    valueRange = 0.5f..1.0f,
+                                                    steps = 4,
+                                                    modifier = Modifier.width(160.dp)
+                                                )
+                                            }
+                                        }
+                                    }
                                     Spacer(modifier = Modifier.height(12.dp))
                                     AuraToggleRow(
                                         title = "Floating Mini-Orb Overlay",
@@ -703,6 +789,25 @@ fun SettingsScreen(
                                                     }
                                                 )
                                             }
+                                            Spacer(modifier = Modifier.height(10.dp))
+                                            AuraButton(
+                                                text = "👁️ Show Dot Markers on Screen",
+                                                onClick = {
+                                                    scope.launch {
+                                                        val locator = com.example.core.unlock.PatternGridLocator(
+                                                            context,
+                                                            rootManager,
+                                                            com.example.AuraApplication.instance.inputController,
+                                                            com.example.core.settings.EncryptedKeyStorage(context)
+                                                        )
+                                                        val detection = locator.locatePatternGrid()
+                                                        com.example.AuraApplication.instance.overlayController.agentCursorOverlay.showCalibrationMarkers(detection.points)
+                                                        Toast.makeText(context, "Displaying 9 dot positions on screen for 5s", Toast.LENGTH_SHORT).show()
+                                                    }
+                                                },
+                                                isPrimary = false,
+                                                modifier = Modifier.fillMaxWidth()
+                                            )
                                         }
 
                                         "PIN" -> {
@@ -863,6 +968,45 @@ fun SettingsScreen(
                                             },
                                             isPrimary = false,
                                             modifier = Modifier.weight(1f)
+                                        )
+                                    }
+
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                    var safetyStatusText by remember { mutableStateOf("Checking safety limit...") }
+                                    LaunchedEffect(isTestingUnlock) {
+                                        val policy = com.example.core.unlock.UnlockManager.getInstance(context).safetyPolicy
+                                        safetyStatusText = policy.getStatusDescription()
+                                    }
+
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .background(colors.surfaceRaised, RoundedCornerShape(10.dp))
+                                            .padding(10.dp)
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = "Unlock Safety Policy",
+                                                style = typography.labelSmall.copy(color = colors.textPrimary, fontWeight = FontWeight.Bold)
+                                            )
+                                            Text(
+                                                text = safetyStatusText,
+                                                style = typography.bodySmall.copy(color = colors.textSecondary)
+                                            )
+                                        }
+                                        AuraButton(
+                                            text = "Reset Limit",
+                                            onClick = {
+                                                scope.launch {
+                                                    val policy = com.example.core.unlock.UnlockManager.getInstance(context).safetyPolicy
+                                                    policy.resetSafetyLimit()
+                                                    safetyStatusText = policy.getStatusDescription()
+                                                    Toast.makeText(context, "Unlock safety limit reset!", Toast.LENGTH_SHORT).show()
+                                                }
+                                            },
+                                            isPrimary = false
                                         )
                                     }
 
@@ -1147,6 +1291,172 @@ fun SettingsScreen(
                                         checked = plannerUseScreenshots,
                                         onCheckedChange = { scope.launch { preferences.setPlannerUseScreenshots(it) } }
                                     )
+                                }
+                            }
+                        }
+
+                        SettingsCategory.NOTIFICATION_DETECT -> {
+                            // 1. Master Configuration Card
+                            item {
+                                AuraCard(modifier = Modifier.fillMaxWidth()) {
+                                    Text(
+                                        text = "Notification Voice Detect & Announcements",
+                                        style = typography.titleMedium.copy(color = colors.textPrimary)
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = "Aura detects incoming notifications from your selected apps and announces who messaged and what they sent in real-time.",
+                                        style = typography.bodySmall.copy(color = colors.textSecondary)
+                                    )
+                                    Spacer(modifier = Modifier.height(14.dp))
+
+                                    AuraToggleRow(
+                                        title = "Enable Notification Announcements",
+                                        subtitle = "Speaks incoming notifications out loud automatically.",
+                                        checked = notifAnnounceEnabled,
+                                        onCheckedChange = { scope.launch { preferences.setNotifAnnounceEnabled(it) } }
+                                    )
+
+                                    Spacer(modifier = Modifier.height(10.dp))
+
+                                    AuraToggleRow(
+                                        title = "Read Full Message Content",
+                                        subtitle = "Reads sender name + message text. If turned off, only announces sender and app.",
+                                        checked = notifAnnounceReadContent,
+                                        onCheckedChange = { scope.launch { preferences.setNotifAnnounceReadContent(it) } }
+                                    )
+
+                                    Spacer(modifier = Modifier.height(14.dp))
+
+                                    AuraButton(
+                                        text = "🔊 Test Announcement Voice",
+                                        onClick = {
+                                            com.example.core.telephony.NotificationAnnouncementManager.instance?.announceTest(
+                                                appName = "WhatsApp",
+                                                sender = "Rahul",
+                                                message = "Bhai, Maya announcements bilkul perfectly bol rahi hai!"
+                                            ) ?: run {
+                                                val mgr = com.example.core.telephony.NotificationAnnouncementManager(context, preferences)
+                                                mgr.announceTest("WhatsApp", "Rahul", "Bhai, Maya announcements bilkul perfectly bol rahi hai!")
+                                            }
+                                            Toast.makeText(context, "Playing test notification announcement...", Toast.LENGTH_SHORT).show()
+                                        },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        testTag = "test_announce_btn"
+                                    )
+                                }
+                            }
+
+                            // 2. App Watchlist Selection Card
+                            item {
+                                AuraCard(modifier = Modifier.fillMaxWidth()) {
+                                    Text(
+                                        text = "Watched Applications (${notifAnnounceApps.size} active)",
+                                        style = typography.titleMedium.copy(color = colors.textPrimary)
+                                    )
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        text = "Select which apps Maya will monitor for voice announcements.",
+                                        style = typography.bodySmall.copy(color = colors.textSecondary)
+                                    )
+
+                                    Spacer(modifier = Modifier.height(14.dp))
+
+                                    val popularApps = listOf(
+                                        Triple("WhatsApp", "com.whatsapp", "💬"),
+                                        Triple("WhatsApp Business", "com.whatsapp.w4b", "💼"),
+                                        Triple("Telegram", "org.telegram.messenger", "✈️"),
+                                        Triple("SMS / Messages", "com.google.android.apps.messaging", "📨"),
+                                        Triple("Gmail", "com.google.android.gm", "📧"),
+                                        Triple("Instagram", "com.instagram.android", "📷"),
+                                        Triple("Snapchat", "com.snapchat.android", "👻"),
+                                        Triple("Truecaller", "com.truecaller", "📞"),
+                                        Triple("YouTube", "com.google.android.youtube", "▶️"),
+                                        Triple("Twitter / X", "com.twitter.android", "🐦")
+                                    )
+
+                                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        popularApps.forEach { (appName, pkg, emoji) ->
+                                            val isWatched = notifAnnounceApps.contains(pkg)
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .clip(RoundedCornerShape(12.dp))
+                                                    .background(if (isWatched) Color(0xFF1E2438) else Color(0xFF141722))
+                                                    .border(
+                                                        1.dp,
+                                                        if (isWatched) Color(0xFF7085FF).copy(alpha = 0.5f) else Color(0xFF262C40),
+                                                        RoundedCornerShape(12.dp)
+                                                    )
+                                                    .clickable {
+                                                        scope.launch { preferences.toggleNotifAnnounceApp(pkg) }
+                                                    }
+                                                    .padding(horizontal = 14.dp, vertical = 10.dp)
+                                            ) {
+                                                Text(text = emoji, fontSize = 20.sp)
+                                                Spacer(modifier = Modifier.width(12.dp))
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text(
+                                                        text = appName,
+                                                        style = typography.bodyMedium.copy(color = colors.textPrimary, fontWeight = FontWeight.SemiBold)
+                                                    )
+                                                    Text(
+                                                        text = pkg,
+                                                        style = typography.labelSmall.copy(color = colors.textTertiary, fontFamily = FontFamily.Monospace)
+                                                    )
+                                                }
+                                                Switch(
+                                                    checked = isWatched,
+                                                    onCheckedChange = {
+                                                        scope.launch { preferences.toggleNotifAnnounceApp(pkg) }
+                                                    },
+                                                    colors = SwitchDefaults.colors(
+                                                        checkedThumbColor = Color.White,
+                                                        checkedTrackColor = Color(0xFF7085FF)
+                                                    )
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    Spacer(modifier = Modifier.height(16.dp))
+
+                                    Text(
+                                        text = "Add Custom App by Package Name",
+                                        style = typography.labelMedium.copy(color = colors.textPrimary)
+                                    )
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        AuraTextField(
+                                            value = customPackageInput,
+                                            onValueChange = { customPackageInput = it },
+                                            placeholder = "e.g. com.discord",
+                                            modifier = Modifier.weight(1f),
+                                            testTag = "custom_notif_pkg_field"
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        AuraButton(
+                                            text = "+ Add",
+                                            onClick = {
+                                                val clean = customPackageInput.trim().lowercase(java.util.Locale.ROOT)
+                                                if (clean.isNotBlank()) {
+                                                    scope.launch {
+                                                        val updated = notifAnnounceApps.toMutableSet()
+                                                        updated.add(clean)
+                                                        preferences.setNotifAnnounceApps(updated)
+                                                        customPackageInput = ""
+                                                        Toast.makeText(context, "Added $clean to watched apps", Toast.LENGTH_SHORT).show()
+                                                    }
+                                                }
+                                            },
+                                            enabled = customPackageInput.isNotBlank(),
+                                            testTag = "add_custom_pkg_btn"
+                                        )
+                                    }
                                 }
                             }
                         }

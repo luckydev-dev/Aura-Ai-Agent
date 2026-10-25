@@ -100,6 +100,24 @@ class LiveDiagnostics {
     private val _overlayStateInfo = MutableStateFlow("Inactive")
     val overlayStateInfo: StateFlow<String> = _overlayStateInfo.asStateFlow()
 
+    private val _overlayPassThroughStatus = MutableStateFlow("Overlay pass-through OK (alpha<=0.79)")
+    val overlayPassThroughStatus: StateFlow<String> = _overlayPassThroughStatus.asStateFlow()
+
+    fun updateOverlayPassThroughStatus() {
+        val attached = com.example.ui.overlay.OverlayWindowDefaults.getAttachedWindows()
+        if (attached.isEmpty()) {
+            _overlayPassThroughStatus.value = "Overlay pass-through OK (0 windows attached)"
+            return
+        }
+        val hasViolation = attached.any { it.value > com.example.ui.overlay.OverlayWindowDefaults.MAX_PASSTHROUGH_ALPHA }
+        val desc = attached.entries.joinToString { "${it.key}: ${it.value}" }
+        if (hasViolation) {
+            _overlayPassThroughStatus.value = "WARNING: Window alpha > 0.8 blocks touches! ($desc)"
+        } else {
+            _overlayPassThroughStatus.value = "Overlay pass-through OK: alpha<=0.79 on all windows ($desc)"
+        }
+    }
+
     // Permission Doctor & App Inventory
     private val _permissionDoctorReport = MutableStateFlow("All systems verified")
     val permissionDoctorReport: StateFlow<String> = _permissionDoctorReport.asStateFlow()
@@ -248,6 +266,8 @@ class LiveDiagnostics {
         sb.append("Recent Interruptions: ${_recentInterruptionsCount.value}\n")
         sb.append("Caption Info: ${_captionTurnInfo.value}\n")
         sb.append("Overlay: ${_overlayStateInfo.value}\n")
+        updateOverlayPassThroughStatus()
+        sb.append("Overlay Pass-Through: ${_overlayPassThroughStatus.value}\n")
         sb.append("Permission Doctor: ${_permissionDoctorReport.value}\n")
         sb.append("App Inventory: ${_appInventorySize.value}\n")
         sb.append("SetupComplete: ${_setupCompleteArrived.value}\n")

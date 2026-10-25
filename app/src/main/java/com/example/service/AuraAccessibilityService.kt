@@ -47,6 +47,25 @@ class AuraAccessibilityService : AccessibilityService() {
         return root.findAccessibilityNodeInfosByText(text) ?: emptyList()
     }
 
+    fun findNodeByQuery(query: String): AccessibilityNodeInfo? {
+        val root = rootInActiveWindow ?: return null
+        fun search(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+            if (node == null) return null
+            val t = node.text?.toString() ?: ""
+            val d = node.contentDescription?.toString() ?: ""
+            val id = node.viewIdResourceName?.toString() ?: ""
+            if (t.contains(query, ignoreCase = true) || d.contains(query, ignoreCase = true) || id.contains(query, ignoreCase = true)) {
+                return node
+            }
+            for (i in 0 until node.childCount) {
+                val child = search(node.getChild(i))
+                if (child != null) return child
+            }
+            return null
+        }
+        return search(root)
+    }
+
     /**
      * Traverses in-memory active window hierarchy and extracts compact ScreenNodes (sub-30ms).
      */
@@ -116,6 +135,64 @@ class AuraAccessibilityService : AccessibilityService() {
             return focused.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
         }
         return false
+    }
+
+    /**
+     * Finds the deepest clickable node containing (x, y) or climbs up to a clickable ancestor.
+     */
+    fun findClickableNodeAt(x: Float, y: Float): AccessibilityNodeInfo? {
+        val root = rootInActiveWindow ?: return null
+        val ix = x.toInt()
+        val iy = y.toInt()
+        var bestNode: AccessibilityNodeInfo? = null
+
+        fun search(node: AccessibilityNodeInfo?) {
+            if (node == null) return
+            val bounds = Rect()
+            node.getBoundsInScreen(bounds)
+            if (bounds.contains(ix, iy)) {
+                if (node.isClickable) {
+                    bestNode = node
+                }
+                for (i in 0 until node.childCount) {
+                    search(node.getChild(i))
+                }
+            }
+        }
+        search(root)
+
+        if (bestNode != null) return bestNode
+
+        fun findDeepest(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+            if (node == null) return null
+            val bounds = Rect()
+            node.getBoundsInScreen(bounds)
+            if (bounds.contains(ix, iy)) {
+                for (i in 0 until node.childCount) {
+                    val childHit = findDeepest(node.getChild(i))
+                    if (childHit != null) return childHit
+                }
+                return node
+            }
+            return null
+        }
+
+        var curr = findDeepest(root)
+        while (curr != null) {
+            if (curr.isClickable) return curr
+            curr = curr.parent
+        }
+        return null
+    }
+
+    /**
+     * Directly clicks the clickable node at (x, y) via Accessibility IPC,
+     * completely bypassing InputDispatcher and any screen overlays.
+     */
+    fun performClickAt(x: Float, y: Float): Boolean {
+        val node = findClickableNodeAt(x, y) ?: return false
+        val clicked = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        return clicked
     }
 
     /**
