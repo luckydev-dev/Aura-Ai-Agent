@@ -356,9 +356,9 @@ class InputController(
     }
 
     /**
-     * Draws continuous multi-segment path (for pattern lock).
-     * Uses Accessibility Gesture first (single continuous stroke on keyguard),
-     * and fallback to a single root script with minimal command count.
+     * Draws a continuous multi-segment path gesture (e.g. free-hand drawing or a multi-point swipe).
+     * Uses an Accessibility Gesture first (single continuous stroke),
+     * and falls back to a single root script with minimal command count.
      */
     suspend fun drawPath(points: List<Pair<Float, Float>>, durationMs: Long = 700L, label: String = ""): Boolean = withContext(Dispatchers.IO) {
         if (points.size < 2) return@withContext false

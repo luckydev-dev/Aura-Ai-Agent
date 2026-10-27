@@ -136,10 +136,6 @@ class AuraPreferences(
         val KEY_WHATSAPP_BUSINESS = booleanPreferencesKey("whatsapp_business")
         val KEY_ONBOARDING_COMPLETED = booleanPreferencesKey("onboarding_completed")
 
-        // Unlock Safety Policy
-        val KEY_UNLOCK_CONSECUTIVE_FAILURES = intPreferencesKey("unlock_consecutive_failures")
-        val KEY_UNLOCK_BLOCKED_UNTIL_MS = longPreferencesKey("unlock_blocked_until_ms")
-
         // Floating Captions Customization
         val KEY_INTERACTIVE_CAPTIONS_HANDLE = booleanPreferencesKey("interactive_captions_handle") // default false
         val KEY_CAPTION_POSITION = stringPreferencesKey("caption_position") // "BOTTOM", "TOP"
@@ -506,33 +502,6 @@ class AuraPreferences(
         it[KEY_OWNER_VOICE_LOCK_ENABLED] ?: false
     }
 
-    // Secure Screen Lock Credentials & Options (Stored in EncryptedKeyStorage)
-    private val _credentialTrigger = kotlinx.coroutines.flow.MutableStateFlow(System.currentTimeMillis())
-
-    val screenLockType: Flow<String> = _credentialTrigger.map {
-        encryptedKeyStorage.getLockType()
-    }
-
-    val savedPatternPoints: Flow<String> = _credentialTrigger.map {
-        encryptedKeyStorage.getPatternPoints()
-    }
-
-    val savedLockPin: Flow<String> = _credentialTrigger.map {
-        encryptedKeyStorage.getLockPin()
-    }
-
-    val savedLockPassword: Flow<String> = _credentialTrigger.map {
-        encryptedKeyStorage.getLockPassword()
-    }
-
-    val confirmBeforeUnlock: Flow<Boolean> = _credentialTrigger.map {
-        encryptedKeyStorage.getConfirmBeforeUnlock()
-    }
-
-    val showCursorDuringUnlock: Flow<Boolean> = _credentialTrigger.map {
-        encryptedKeyStorage.getShowCursorDuringUnlock()
-    }
-
     // Safe mode
     val isSafeModeTriggered: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
         it[KEY_SAFE_MODE_TRIGGERED] ?: false
@@ -607,14 +576,6 @@ class AuraPreferences(
 
     val isWhatsappBusiness: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
         it[KEY_WHATSAPP_BUSINESS] ?: false
-    }
-
-    val unlockConsecutiveFailures: Flow<Int> = context.dataStore.data.catch { emitDefaults(it) }.map {
-        it[KEY_UNLOCK_CONSECUTIVE_FAILURES] ?: 0
-    }
-
-    val unlockBlockedUntilMs: Flow<Long> = context.dataStore.data.catch { emitDefaults(it) }.map {
-        it[KEY_UNLOCK_BLOCKED_UNTIL_MS] ?: 0L
     }
 
     val interactiveCaptionsHandle: Flow<Boolean> = context.dataStore.data.catch { emitDefaults(it) }.map {
@@ -778,74 +739,20 @@ class AuraPreferences(
     suspend fun setWhatsappBusiness(enabled: Boolean) = context.dataStore.edit { it[KEY_WHATSAPP_BUSINESS] = enabled }
     suspend fun setOnboardingCompleted(completed: Boolean) = context.dataStore.edit { it[KEY_ONBOARDING_COMPLETED] = completed }
 
-    // Secure Screen Lock Credentials
-    suspend fun setScreenLockType(type: String) {
-        encryptedKeyStorage.setLockType(type)
-        _credentialTrigger.value = System.currentTimeMillis()
-        resetUnlockSafetyLimit()
-    }
-    suspend fun setSavedPatternPoints(points: String) {
-        encryptedKeyStorage.setPatternPoints(points)
-        _credentialTrigger.value = System.currentTimeMillis()
-        resetUnlockSafetyLimit()
-    }
-    suspend fun setSavedLockPin(pin: String) {
-        encryptedKeyStorage.setLockPin(pin)
-        _credentialTrigger.value = System.currentTimeMillis()
-        resetUnlockSafetyLimit()
-    }
-    suspend fun setSavedLockPassword(password: String) {
-        encryptedKeyStorage.setLockPassword(password)
-        _credentialTrigger.value = System.currentTimeMillis()
-        resetUnlockSafetyLimit()
-    }
-    suspend fun setConfirmBeforeUnlock(confirm: Boolean) {
-        encryptedKeyStorage.setConfirmBeforeUnlock(confirm)
-        _credentialTrigger.value = System.currentTimeMillis()
-    }
-    suspend fun setShowCursorDuringUnlock(show: Boolean) {
-        encryptedKeyStorage.setShowCursorDuringUnlock(show)
-        _credentialTrigger.value = System.currentTimeMillis()
-    }
-    suspend fun setPatternCalibrationJson(json: String) {
-        encryptedKeyStorage.setPatternCalibrationJson(json)
-        _credentialTrigger.value = System.currentTimeMillis()
-    }
-
-    suspend fun setUnlockConsecutiveFailures(count: Int) = context.dataStore.edit { it[KEY_UNLOCK_CONSECUTIVE_FAILURES] = count }
-    suspend fun setUnlockBlockedUntilMs(timestamp: Long) = context.dataStore.edit { it[KEY_UNLOCK_BLOCKED_UNTIL_MS] = timestamp }
-    suspend fun resetUnlockSafetyLimit() = context.dataStore.edit {
-        it[KEY_UNLOCK_CONSECUTIVE_FAILURES] = 0
-        it[KEY_UNLOCK_BLOCKED_UNTIL_MS] = 0L
-    }
-
     suspend fun setInteractiveCaptionsHandle(enabled: Boolean) = context.dataStore.edit { it[KEY_INTERACTIVE_CAPTIONS_HANDLE] = enabled }
     suspend fun setCaptionPosition(position: String) = context.dataStore.edit { it[KEY_CAPTION_POSITION] = position }
     suspend fun setCaptionAutoHideSeconds(sec: Int) = context.dataStore.edit { it[KEY_CAPTION_AUTO_HIDE_SECONDS] = sec }
     suspend fun setCaptionTransparency(alpha: Float) = context.dataStore.edit { it[KEY_CAPTION_TRANSPARENCY] = alpha }
 
-    suspend fun migrateLegacyCredentialsAndEdgeLighting() {
+    /**
+     * One-time cleanup: purges old plaintext screen-lock credential keys and
+     * retired edge-lighting style keys that may still exist from earlier app versions.
+     * Aura no longer stores or uses device lock-screen credentials in any form.
+     */
+    suspend fun migrateLegacyEdgeLighting() {
         try {
             context.dataStore.edit { prefs ->
-                val legacyType = prefs[stringPreferencesKey("screen_lock_type")]
-                val legacyPin = prefs[stringPreferencesKey("saved_lock_pin")]
-                val legacyPattern = prefs[stringPreferencesKey("saved_pattern_points")]
-                val legacyPassword = prefs[stringPreferencesKey("saved_lock_password")]
-
-                if (!legacyType.isNullOrBlank() && encryptedKeyStorage.getLockType().isBlank()) {
-                    encryptedKeyStorage.setLockType(legacyType)
-                }
-                if (!legacyPin.isNullOrBlank() && encryptedKeyStorage.getLockPin().isBlank()) {
-                    encryptedKeyStorage.setLockPin(legacyPin)
-                }
-                if (!legacyPattern.isNullOrBlank() && encryptedKeyStorage.getPatternPoints().isBlank()) {
-                    encryptedKeyStorage.setPatternPoints(legacyPattern)
-                }
-                if (!legacyPassword.isNullOrBlank() && encryptedKeyStorage.getLockPassword().isBlank()) {
-                    encryptedKeyStorage.setLockPassword(legacyPassword)
-                }
-
-                // Remove legacy keys from DataStore
+                // Purge any leftover plaintext screen-lock credential keys from older versions.
                 prefs.remove(stringPreferencesKey("screen_lock_type"))
                 prefs.remove(stringPreferencesKey("saved_lock_pin"))
                 prefs.remove(stringPreferencesKey("saved_pattern_points"))
@@ -856,10 +763,10 @@ class AuraPreferences(
                 prefs.remove(floatPreferencesKey("edge_lighting_flow_speed"))
                 prefs.remove(intPreferencesKey("edge_lighting_depth_percent"))
             }
-            _credentialTrigger.value = System.currentTimeMillis()
         } catch (e: Exception) {
             Log.e(TAG, "Failed migration: ${e.message}", e)
         }
+        runCatching { encryptedKeyStorage.clearLegacyLockCredentials() }
     }
 
     suspend fun setToolEnabled(toolName: String, enabled: Boolean) {

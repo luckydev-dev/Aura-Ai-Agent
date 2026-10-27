@@ -751,7 +751,6 @@ fun AgentCursorSettingsCard(
     val showTrail by preferences.agentCursorTrail.collectAsState(initial = true)
     val showRipple by preferences.agentCursorRipple.collectAsState(initial = true)
     val showLabel by preferences.agentCursorActionLabel.collectAsState(initial = true)
-    val showUnlock by preferences.showCursorDuringUnlock.collectAsState(initial = false)
 
     fun triggerCursorPreview(
         previewStyle: CursorStyle? = null,
@@ -935,15 +934,6 @@ fun AgentCursorSettingsCard(
                     Text("Action Label Pills", style = typography.bodySmall.copy(color = colors.textPrimary))
                     Switch(checked = showLabel, onCheckedChange = { scope.launch { preferences.setAgentCursorActionLabel(it) } })
                 }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("Show During Phone Unlock", style = typography.bodySmall.copy(color = colors.textPrimary))
-                    Switch(checked = showUnlock, onCheckedChange = { scope.launch { preferences.setShowCursorDuringUnlock(it) } })
-                }
-
                 Spacer(modifier = Modifier.height(14.dp))
 
                 // Demo Test Button

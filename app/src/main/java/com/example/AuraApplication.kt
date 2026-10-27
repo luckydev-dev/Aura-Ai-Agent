@@ -73,7 +73,7 @@ class AuraApplication : Application(), Application.ActivityLifecycleCallbacks {
 
         appScope.launch {
             try {
-                AuraPreferences(this@AuraApplication).migrateLegacyCredentialsAndEdgeLighting()
+                AuraPreferences(this@AuraApplication).migrateLegacyEdgeLighting()
             } catch (e: Exception) {
                 Log.e(TAG, "Error running legacy migration: ${e.message}", e)
             }
