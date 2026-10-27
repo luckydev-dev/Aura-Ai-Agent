@@ -106,11 +106,6 @@ class OverlayController(
                 agentCursorOverlay.showActionLabel = label
             }
         }
-        controllerScope.launch {
-            preferences.showCursorDuringUnlock.collectLatest { show ->
-                agentCursorOverlay.showDuringUnlock = show
-            }
-        }
 
         // Re-evaluate overlays whenever Foreground State changes!
         controllerScope.launch {

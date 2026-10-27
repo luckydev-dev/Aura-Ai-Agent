@@ -526,20 +526,6 @@ class DeviceTools(
         }
     }
 
-    val unlockPhoneTool = object : Tool {
-        override val name = "unlock_phone"
-        override val description = "Wakes up and unlocks the phone screen using owner's configured credentials (pattern, PIN, or password) via verified root/accessibility state machine."
-        override val parametersSchema = mapOf("type" to "object", "properties" to emptyMap<String, Any>())
-
-        override suspend fun execute(args: Map<String, Any?>): ToolExecutionResult {
-            val unlockManager = com.example.core.unlock.UnlockManager.getInstance(context)
-            val result = unlockManager.executeUnlock(dryRunOnlyBouncer = false)
-            val isSuccess = result.status == com.example.core.unlock.UnlockStatus.UNLOCKED ||
-                            result.status == com.example.core.unlock.UnlockStatus.ALREADY_UNLOCKED
-            return ToolExecutionResult(isSuccess, result.humanMessage)
-        }
-    }
-
     val lockPhoneTool = object : Tool {
         override val name = "lock_phone"
         override val description = "Immediately locks the phone screen."
@@ -563,6 +549,6 @@ class DeviceTools(
         setRingerModeTool, getBatteryTool, getStorageTool, getRamTool,
         getNetworkInfoTool, getDeviceInfoTool, takeScreenshotTool, recordScreenTool,
         rebootTool, shutdownTool, controlMediaTool, getDeviceTelemetryTool,
-        toggleNfcTool, vibrateDeviceTool, unlockPhoneTool, lockPhoneTool
+        toggleNfcTool, vibrateDeviceTool, lockPhoneTool
     )
 }

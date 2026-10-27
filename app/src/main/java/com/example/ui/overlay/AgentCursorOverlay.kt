@@ -64,7 +64,6 @@ class AgentCursorOverlay(
     var showTrail: Boolean = true
     var showRipple: Boolean = true
     var showActionLabel: Boolean = true
-    var showDuringUnlock: Boolean = false
 
     init {
         // Register cursor listener with InputController
